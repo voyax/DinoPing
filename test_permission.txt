@@ -1,0 +1,4 @@
+This is a test file for AgentPulse permission approval.
+你应该在 notch 上看到这个 diff！点 Allow 放行，点 Deny 拒绝。
+If you see this in the notch panel with Allow/Deny/Bypass buttons, it's working!
+This edit should show a red/green diff in the permission banner.

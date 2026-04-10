@@ -218,8 +218,7 @@ final class NotchPanel {
         guard let panel else { return }
         let view = NotchContentView(
             agentManager: agentManager,
-            panelState: panelState,
-            onTap: { [weak self] in self?.handleTap() }
+            panelState: panelState
         )
         let hosting = NSHostingView(rootView: view)
         hosting.frame = panel.contentView?.bounds ?? .zero

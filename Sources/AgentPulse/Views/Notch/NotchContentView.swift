@@ -4,7 +4,6 @@ import SwiftUI
 struct NotchContentView: View {
     let agentManager: AgentManager
     let panelState: NotchPanelState
-    let onTap: () -> Void
 
     private var displayState: NotchDisplayState { panelState.displayState }
     private var hasNotch: Bool { panelState.hasNotch }
@@ -72,7 +71,11 @@ struct NotchContentView: View {
         // 540×420 panel canvas.
         .frame(width: silhouetteWidth, height: silhouetteHeight)
         .contentShape(NotchShape(topRadius: topRadius, bottomRadius: bottomRadius))
-        .onTapGesture { onTap() }
+        // NOTE: no `.onTapGesture` here — it used to call handleTap() to
+        // toggle compact↔expanded, but it also intercepted clicks on child
+        // Buttons (like the ↗ terminal-jump button) and prevented them from
+        // firing. Collapse is handled by hover-out via the NSEvent monitor.
+        //
         // NOTE: no `.onHover` here. Hover detection lives entirely in
         // `NotchPanel.updateMouseState` (NSEvent monitor). Adding SwiftUI
         // `.onHover` on this view used to compete with the NSEvent path —
@@ -242,19 +245,19 @@ struct SessionCard: View {
     @State private var jumpHovering = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // Round agent icon with tinted background. Explicit width so it
-            // can't get squeezed out by the title row to its right.
+        HStack(alignment: .top, spacing: 10) {
+            // Small agent icon — just enough to hint at agent type without
+            // dominating the card. 20pt feels proportional to 13pt title.
             ZStack {
                 Circle()
-                    .fill(session.agentKind.tintColor.opacity(0.18))
+                    .fill(session.agentKind.tintColor.opacity(0.14))
                 Image(systemName: session.agentKind.iconName)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(session.agentKind.tintColor)
             }
-            .frame(width: 32, height: 32)
+            .frame(width: 22, height: 22)
+            .padding(.top, 1)
 
-            // Title + prompt + meta footer
             VStack(alignment: .leading, spacing: 5) {
                 // Row 1: project name, status dot, time
                 HStack(alignment: .center, spacing: 7) {
@@ -271,9 +274,8 @@ struct SessionCard: View {
                     Spacer(minLength: 4)
 
                     Text(elapsedText)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.32))
-                        .monospacedDigit()
                 }
 
                 // Row 2: prompt body — the hero of the card
@@ -364,8 +366,10 @@ struct SessionCard: View {
         }
     }
 
+    /// Shows time since last activity, not session start. A session that
+    /// started 2 hours ago but had a tool call 30 seconds ago shows "<1m".
     private var elapsedText: String {
-        let seconds = Int(Date.now.timeIntervalSince(session.startTime))
+        let seconds = Int(Date.now.timeIntervalSince(session.lastEventTime))
         if seconds < 60 { return "<1m" }
         if seconds < 3600 { return "\(seconds / 60)m" }
         return "\(seconds / 3600)h"
