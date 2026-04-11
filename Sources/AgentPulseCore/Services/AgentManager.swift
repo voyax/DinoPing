@@ -143,9 +143,13 @@ public final class AgentManager {
     /// "test-" or "debug-session"). Prevents test artifacts from cluttering
     /// the real session list.
     public func cleanupTestSessions() {
-        let testPrefixes = ["test-", "debug-", "manual-", "fake-"]
+        // Real IDs: hex UUIDs ("64c6ce89-...") or PID-based ("proc-1234").
+        // Anything else is a test/debug artifact.
+        let hexChars = CharacterSet(charactersIn: "0123456789abcdef")
         let testIds = sessions.keys.filter { id in
-            testPrefixes.contains(where: { id.hasPrefix($0) })
+            if id.hasPrefix("proc-") { return false }
+            let prefix = String(id.prefix(8))
+            return prefix.unicodeScalars.contains(where: { !hexChars.contains($0) })
         }
         for id in testIds { sessions.removeValue(forKey: id) }
     }
