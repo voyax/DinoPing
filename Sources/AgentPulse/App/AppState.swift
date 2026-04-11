@@ -94,6 +94,7 @@ final class AppState {
                     SoundManager.shared.play(.agentError)
                 }
                 self.agentManager.cleanupStaleSessions()
+                self.agentManager.cleanupTestSessions()
                 // Every ~60s, re-scan for processes we may have missed or
                 // whose sessions got cleaned up while still alive.
                 tick += 1
@@ -188,10 +189,19 @@ final class AppState {
             for req in manager.pendingPermissions { manager.denyPermission(id: req.id, reason: "debug clear") }
             return "{\"cleared\":\(count)}"
 
+        case "permissions:approve":
+            let count = manager.pendingPermissions.count
+            for req in manager.pendingPermissions { manager.approvePermission(id: req.id) }
+            return "{\"approved\":\(count)}"
+
         case "sessions:clear":
             let count = manager.sessions.count
             manager.debugRemoveAllSessions()
             return "{\"cleared\":\(count)}"
+
+        case "sessions:cleanup-test":
+            manager.cleanupTestSessions()
+            return "{\"ok\":true}"
 
         case "screens":
             let entries = NSScreen.screens.enumerated().map { idx, s -> String in

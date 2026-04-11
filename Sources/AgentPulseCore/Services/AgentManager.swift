@@ -134,10 +134,17 @@ public final class AgentManager {
         return session
     }
 
-    /// Removes every session — used by `/debug/sessions/clear` for visual
-    /// testing of the empty state. Not meant for production paths.
+    /// Removes every session — used by `/debug/sessions/clear`.
     public func debugRemoveAllSessions() {
         sessions.removeAll()
+    }
+
+    /// Removes sessions created by test/debug endpoints (IDs starting with
+    /// "test-" or "debug-session"). Prevents test artifacts from cluttering
+    /// the real session list.
+    public func cleanupTestSessions() {
+        let testIds = sessions.keys.filter { $0.hasPrefix("test-") || $0 == "debug-session" }
+        for id in testIds { sessions.removeValue(forKey: id) }
     }
 
     public func cleanupStaleSessions() {

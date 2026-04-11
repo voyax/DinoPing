@@ -141,6 +141,9 @@ public actor HookHTTPServer {
         router.post("debug/permissions/clear") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "permissions:clear")
         }
+        router.post("debug/permissions/approve") { _, _ -> Response in
+            await Self.debugResponse(handler: handler, command: "permissions:approve")
+        }
         router.post("debug/sessions/clear") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "sessions:clear")
         }
