@@ -199,8 +199,16 @@ struct NotchContentView: View {
                                 request: req, queuePosition: i + 1, queueTotal: permissions.count,
                                 onAllow: { agentManager.approvePermission(id: req.id) },
                                 onAlwaysAllow: {
-                                    // Save rule then approve
-                                    AllowRules.add(.init(toolName: req.toolName))
+                                    // Save rule with the specific command/path,
+                                    // not a blanket nil pattern that matches everything.
+                                    let input = req.toolInput.mapValues { $0.value }
+                                    let pattern = AllowRules.primaryArg(
+                                        toolName: req.toolName, input: input
+                                    )
+                                    AllowRules.add(.init(
+                                        toolName: req.toolName,
+                                        pattern: pattern
+                                    ))
                                     agentManager.approvePermission(id: req.id)
                                 },
                                 onBypass: { agentManager.bypassPermission(id: req.id) },

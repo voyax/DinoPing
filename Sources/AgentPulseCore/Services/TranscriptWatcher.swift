@@ -25,11 +25,22 @@ public final class TranscriptWatcher: @unchecked Sendable {
 
             let source = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: fd,
-                eventMask: [.write, .extend],
+                eventMask: [.write, .extend, .delete, .rename],
                 queue: self.queue
             )
             source.setEventHandler { [weak self] in
-                self?.onChange()
+                guard let self else { return }
+                let flags = source.data
+                if flags.contains(.delete) || flags.contains(.rename) {
+                    // File was replaced — re-register for the new inode
+                    source.cancel()
+                    self.sources.removeValue(forKey: path)
+                    // Brief delay for the new file to appear
+                    self.queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        self?.watch(path: path)
+                    }
+                }
+                self.onChange()
             }
             source.setCancelHandler {
                 close(fd)
@@ -59,8 +70,12 @@ public final class TranscriptWatcher: @unchecked Sendable {
     }
 
     deinit {
-        for (_, entry) in sources {
-            entry.source.cancel()
+        // Synchronous to avoid racing with pending queue.async blocks
+        queue.sync {
+            for (_, entry) in sources {
+                entry.source.cancel()
+            }
+            sources.removeAll()
         }
     }
 }

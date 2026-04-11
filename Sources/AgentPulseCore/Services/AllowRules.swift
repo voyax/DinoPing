@@ -7,6 +7,9 @@ import Foundation
 /// Rules are stored in `~/.agentpulse/rules.json` as an array of
 /// `AllowRule` objects.
 public struct AllowRules: Sendable {
+    /// Serialize load+save to prevent concurrent writes from clobbering.
+    private static let lock = NSLock()
+
     private static let filePath: URL = {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".agentpulse/rules.json")
@@ -33,22 +36,25 @@ public struct AllowRules: Sendable {
             guard let pattern = rule.pattern else { return true }
             // Match pattern against the primary argument (command for Bash,
             // file_path for Edit/Write/Read)
-            let value = primaryArgument(toolName: toolName, input: toolInput)
+            let value = primaryArg(toolName: toolName, input: toolInput)
             return matchGlob(pattern: pattern, value: value)
         }
     }
 
-    /// Save a new rule.
+    /// Save a new rule (thread-safe).
     public static func add(_ rule: AllowRule) {
+        lock.lock()
+        defer { lock.unlock() }
         var rules = load()
-        // Don't duplicate
         guard !rules.contains(rule) else { return }
         rules.append(rule)
         save(rules)
     }
 
-    /// Remove rules matching a tool name.
+    /// Remove rules matching a tool name (thread-safe).
     public static func remove(toolName: String) {
+        lock.lock()
+        defer { lock.unlock() }
         var rules = load()
         rules.removeAll { $0.toolName == toolName }
         save(rules)
@@ -72,7 +78,8 @@ public struct AllowRules: Sendable {
     }
 
     /// Extract the primary argument from tool input for pattern matching.
-    private static func primaryArgument(toolName: String, input: [String: Any]) -> String {
+    /// Public so the UI can use the same logic when creating rules.
+    public static func primaryArg(toolName: String, input: [String: Any]) -> String {
         switch toolName {
         case "Bash":
             return (input["command"] as? String) ?? ""

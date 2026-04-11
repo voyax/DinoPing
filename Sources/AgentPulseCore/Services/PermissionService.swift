@@ -9,6 +9,9 @@ public actor PermissionService {
     private var pending: [String: CheckedContinuation<PermissionDecision, Never>] = [:]
     /// Buffer for resolutions that arrive before awaitDecision stores the continuation.
     private var earlyResolutions: [String: PermissionDecision] = [:]
+    /// IDs that have already been resolved — prevents double-resume from
+    /// concurrent "Allow All" + individual card button clicks.
+    private var resolved: Set<String> = []
 
     public init() {}
 
@@ -24,12 +27,15 @@ public actor PermissionService {
         }
     }
 
-    /// Resume a pending decision. Safe to call multiple times.
+    /// Resume a pending decision. Safe to call multiple times — second+
+    /// calls are no-ops (guarded by `resolved` set).
     public func resolve(requestId: String, decision: PermissionDecision) {
+        guard !resolved.contains(requestId) else { return }
+        resolved.insert(requestId)
+
         if let continuation = pending.removeValue(forKey: requestId) {
             continuation.resume(returning: decision)
         } else {
-            // Fix #2: buffer for later awaitDecision call
             earlyResolutions[requestId] = decision
         }
     }
@@ -41,6 +47,7 @@ public actor PermissionService {
         }
         pending.removeAll()
         earlyResolutions.removeAll()
+        resolved.removeAll()
     }
 
 }

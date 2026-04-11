@@ -52,7 +52,11 @@ enum TerminalJumper {
     /// Best-effort: use AppleScript to find and focus the tab whose tty
     /// hosts the given PID's process tree.
     private static func focusTabForPID(_ pid: Int, bundleID: String) {
-        guard let tty = ttyForPID(pid) else { return }
+        guard let rawTTY = ttyForPID(pid) else { return }
+        // Sanitize tty before embedding in AppleScript to prevent injection
+        let tty = rawTTY
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
 
         let script: String?
         switch bundleID {
