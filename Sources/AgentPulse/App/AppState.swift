@@ -109,7 +109,6 @@ final class AppState {
         let mgr = agentManager
         promptPollTask = Task {
             while !Task.isCancelled {
-                guard !Task.isCancelled else { break }
                 try? await Task.sleep(for: .seconds(5))
                 guard !Task.isCancelled else { break }
                 await mgr.refreshAllPrompts()
@@ -346,9 +345,10 @@ final class AppState {
         observeTask?.cancel()
         promptPollTask?.cancel()
 
-        // Deny all pending permissions FIRST to unblock any waiting bridge
-        // continuations, THEN clear the list. Reversed order would leave
-        // continuations dangling.
+        // denyAll() unblocks waiting bridge continuations (operates on the
+        // PermissionService actor's own dict). removeAll() clears the UI-
+        // facing list. Both are needed; the Task means denyAll() runs
+        // asynchronously but that's fine — it doesn't depend on the array.
         Task { await agentManager.permissionService.denyAll() }
         agentManager.pendingPermissions.removeAll()
 

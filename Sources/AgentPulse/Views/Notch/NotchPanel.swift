@@ -282,15 +282,15 @@ final class NotchPanel {
     private func fadeOutPanel() async {
         guard let panel else { return }
         // NSAnimationContext's completionHandler fires on an arbitrary queue.
-        // We dispatch back to MainActor explicitly before touching the panel
-        // or resuming the continuation (which is MainActor-isolated).
+        // Use Task { @MainActor in } (not DispatchQueue.main.async) so the
+        // closure is formally MainActor-isolated under strict concurrency.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
                 context.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 panel.animator().alphaValue = 0
             } completionHandler: {
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     panel.orderOut(nil)
                     panel.alphaValue = 1
                     continuation.resume()
