@@ -55,13 +55,15 @@ public struct HookInstaller {
             mergeHookGroup(into: &hooks, event: config.event, hookEntry: hookEntry)
         }
 
-        // Command hook for PermissionRequest (blocking — bridge waits for notch approval)
+        // Command hook for PermissionRequest (blocking — bridge waits for notch approval).
+        // Matcher MUST be "*" (not "") — empty string doesn't match any tools
+        // for PermissionRequest hooks, so the hook would never fire.
         let bridgeHookEntry: [String: Any] = [
             "type": "command",
             "command": "\(bridgePath) --agent claude",
             "timeout": 120,
         ]
-        mergeHookGroup(into: &hooks, event: "PermissionRequest", hookEntry: bridgeHookEntry)
+        mergeHookGroup(into: &hooks, event: "PermissionRequest", hookEntry: bridgeHookEntry, matcher: "*")
 
         settings["hooks"] = hooks
         try writeJSONFile(settings, to: settingsPath)
@@ -141,10 +143,10 @@ public struct HookInstaller {
     // MARK: - Private Helpers
 
     /// Merge a hook entry into the hooks dict, replacing any existing AgentPulse hook for that event.
-    private func mergeHookGroup(into hooks: inout [String: Any], event: String, hookEntry: [String: Any]) {
+    private func mergeHookGroup(into hooks: inout [String: Any], event: String, hookEntry: [String: Any], matcher: String = "") {
         let baseURL = "http://127.0.0.1:\(port)/hooks"
         let hookGroup: [String: Any] = [
-            "matcher": "",
+            "matcher": matcher,
             "hooks": [hookEntry],
         ]
 
