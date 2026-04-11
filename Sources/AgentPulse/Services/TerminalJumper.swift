@@ -30,12 +30,12 @@ enum TerminalJumper {
 
     @MainActor
     static func jump(to session: AgentSession) {
-        // Try to find the hosting app via the process tree first. If the
-        // session has a PID, walk up to find a GUI parent that matches one
-        // of our known terminal/editor bundle IDs.
+        // Try to find the hosting app via the process tree first.
         if let pid = session.pid, pid > 0,
            let hostApp = findHostApp(forPID: pid) {
             hostApp.activate(options: [.activateAllWindows])
+            // Try to focus the exact tab/pane via AppleScript (best-effort)
+            focusTabForPID(pid, bundleID: hostApp.bundleIdentifier ?? "")
             return
         }
 
@@ -47,6 +47,77 @@ enum TerminalJumper {
             }
         }
         NSSound.beep()
+    }
+
+    /// Best-effort: use AppleScript to find and focus the tab whose tty
+    /// hosts the given PID's process tree.
+    private static func focusTabForPID(_ pid: Int, bundleID: String) {
+        guard let tty = ttyForPID(pid) else { return }
+
+        let script: String?
+        switch bundleID {
+        case "com.googlecode.iterm2":
+            script = """
+            tell application "iTerm2"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        repeat with s in sessions of t
+                            if tty of s contains "\(tty)" then
+                                select t
+                                select s
+                                return
+                            end if
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+            """
+        case "com.apple.Terminal":
+            script = """
+            tell application "Terminal"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if tty of t contains "\(tty)" then
+                            set selected tab of w to t
+                            set frontmost of w to true
+                            return
+                        end if
+                    end repeat
+                end repeat
+            end tell
+            """
+        default:
+            script = nil
+        }
+
+        if let script {
+            Task.detached {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                proc.arguments = ["-e", script]
+                proc.standardOutput = FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+                try? proc.run()
+                proc.waitUntilExit()
+            }
+        }
+    }
+
+    /// Find the tty device for a PID by checking /dev/ttys*.
+    private static func ttyForPID(_ pid: Int) -> String? {
+        let pipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-o", "tty=", "-p", "\(pid)"]
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty == true ? nil : String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Walk the process tree from `pid` upward, looking for a parent whose

@@ -49,20 +49,33 @@ public struct SessionDiscovery: Sendable {
         let agentKind: AgentKind
     }
 
+    /// Process name suffixes → AgentKind mapping for all supported agents.
+    private static let processMatchers: [(suffix: String, kind: AgentKind)] = [
+        ("claude", .claudeCode),
+        ("claude-code", .claudeCode),
+        ("codex", .codexCLI),
+        ("gemini", .geminiCLI),
+    ]
+
     private func findAgentProcesses() -> [AgentProcess] {
         guard let output = shell("ps -eo pid,comm", timeout: 5) else { return [] }
 
-        let claudePids = output.components(separatedBy: "\n").compactMap { line -> Int? in
+        var results: [AgentProcess] = []
+        for line in output.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasSuffix("claude") || trimmed.hasSuffix("claude-code") else { return nil }
-            let parts = trimmed.split(separator: " ", maxSplits: 1)
-            return Int(parts.first ?? "")
+            for matcher in Self.processMatchers {
+                if trimmed.hasSuffix(matcher.suffix) {
+                    let parts = trimmed.split(separator: " ", maxSplits: 1)
+                    if let pid = Int(parts.first ?? "") {
+                        if let cwd = cwdForProcess(pid) {
+                            results.append(AgentProcess(pid: pid, cwd: cwd, agentKind: matcher.kind))
+                        }
+                    }
+                    break
+                }
+            }
         }
-
-        return claudePids.compactMap { pid -> AgentProcess? in
-            guard let cwd = cwdForProcess(pid) else { return nil }
-            return AgentProcess(pid: pid, cwd: cwd, agentKind: .claudeCode)
-        }
+        return results
     }
 
     private func cwdForProcess(_ pid: Int) -> String? {

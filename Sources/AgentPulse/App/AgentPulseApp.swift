@@ -60,6 +60,7 @@ struct MenuBarView: View {
         case .waitingForInput: "🟡"
         case .waitingForPermission: "🟠"
         case .idle: "⚪"
+        case .done: "✅"
         case .stopped: "🔴"
         }
     }

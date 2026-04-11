@@ -12,7 +12,6 @@ final class AppState {
     private var serverTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
     private var observeTask: Task<Void, Never>?
-    private var promptPollTask: Task<Void, Never>?
 
     init() {
         startServices()
@@ -46,10 +45,18 @@ final class AppState {
             }
 
             await server.setApprovalHandler { payload, agentType in
+                let toolName = payload.toolName ?? "Unknown"
+                let toolInput = payload.toolInput?.mapValues { $0.value } ?? [:]
+
+                // Check "Always Allow" rules first — auto-approve without UI.
+                if AllowRules.isAllowed(toolName: toolName, toolInput: toolInput) {
+                    return .allow(hookEvent: "PermissionRequest")
+                }
+
                 let requestId = payload.toolUseId ?? "perm-\(UUID().uuidString.prefix(8))"
                 let req = PermissionRequest(
                     id: requestId, sessionId: payload.sessionId,
-                    toolName: payload.toolName ?? "Unknown",
+                    toolName: toolName,
                     toolInput: payload.toolInput ?? [:],
                     cwd: payload.cwd, receivedAt: .now
                 )
@@ -104,16 +111,10 @@ final class AppState {
             }
         }
 
-        // Poll transcript files every 5s to keep the prompt subtitle fresh
-        // even when the conversation is pure text (no tool calls → no hooks).
-        let mgr = agentManager
-        promptPollTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
-                guard !Task.isCancelled else { break }
-                await mgr.refreshAllPrompts()
-            }
-        }
+        // File watcher for near-instant transcript refresh (~10ms latency).
+        // The 30s poll below serves as a fallback in case the watcher misses
+        // a write (e.g., file was replaced instead of appended).
+        agentManager.installTranscriptWatcher()
 
         print("[AgentPulse] ✅ Services started")
     }
@@ -343,7 +344,7 @@ final class AppState {
         serverTask?.cancel()
         cleanupTask?.cancel()
         observeTask?.cancel()
-        promptPollTask?.cancel()
+        agentManager.transcriptWatcher?.unwatchAll()
 
         // denyAll() unblocks waiting bridge continuations (operates on the
         // PermissionService actor's own dict). removeAll() clears the UI-

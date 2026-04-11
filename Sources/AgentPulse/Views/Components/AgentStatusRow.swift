@@ -58,6 +58,10 @@ struct AgentStatusRow: View {
             Circle()
                 .fill(.gray.opacity(0.5))
                 .frame(width: 8, height: 8)
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.blue.opacity(0.7))
+                .font(.system(size: 12))
         case .stopped:
             Circle()
                 .fill(.red.opacity(0.5))
@@ -71,6 +75,7 @@ struct AgentStatusRow: View {
         case .waitingForInput: "Waiting for input"
         case .waitingForPermission: "Needs permission"
         case .idle: "Idle"
+        case .done: "Done"
         case .stopped: "Stopped"
         }
     }

@@ -163,10 +163,46 @@ struct NotchContentView: View {
                 VStack(spacing: 6) {
                     // Permissions first (highest priority)
                     if !permissions.isEmpty {
+                        // Bulk actions when 2+ permissions queued
+                        if permissions.count >= 2 {
+                            HStack(spacing: 8) {
+                                Button {
+                                    for req in permissions { agentManager.approvePermission(id: req.id) }
+                                } label: {
+                                    Label("Allow All (\(permissions.count))", systemImage: "checkmark.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(.white.opacity(0.1))
+                                        .foregroundStyle(.green)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    for req in permissions { agentManager.denyPermission(id: req.id) }
+                                } label: {
+                                    Label("Deny All", systemImage: "xmark.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(.white.opacity(0.08))
+                                        .foregroundStyle(.red.opacity(0.8))
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
                         ForEach(Array(permissions.enumerated()), id: \.element.id) { i, req in
                             PermissionBanner(
                                 request: req, queuePosition: i + 1, queueTotal: permissions.count,
                                 onAllow: { agentManager.approvePermission(id: req.id) },
+                                onAlwaysAllow: {
+                                    // Save rule then approve
+                                    AllowRules.add(.init(toolName: req.toolName))
+                                    agentManager.approvePermission(id: req.id)
+                                },
                                 onBypass: { agentManager.bypassPermission(id: req.id) },
                                 onDeny: { agentManager.denyPermission(id: req.id) }
                             )
@@ -216,7 +252,8 @@ struct NotchContentView: View {
         case .active: 1
         case .waitingForInput: 2
         case .idle: 3
-        case .stopped: 4
+        case .done: 4
+        case .stopped: 5
         }
     }
 
@@ -344,10 +381,10 @@ struct SessionCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.white.opacity(hovering ? 0.07 : 0.04))
+                .fill(.white.opacity(hovering ? 0.09 : 0.05))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(.white.opacity(0.06), lineWidth: 1)
+                        .stroke(.white.opacity(0.08), lineWidth: 0.5)
                 )
         )
         .contentShape(Rectangle())
@@ -361,6 +398,7 @@ struct SessionCard: View {
         case .waitingForPermission: .orange
         case .waitingForInput: .yellow.opacity(0.8)
         case .idle: .gray
+        case .done: .blue.opacity(0.7)
         case .stopped: .red.opacity(0.5)
         }
     }
@@ -371,6 +409,7 @@ struct SessionCard: View {
         case .waitingForInput: return "Waiting for input"
         case .waitingForPermission: return "Needs permission"
         case .idle: return "Idle"
+        case .done: return "Done"
         case .stopped: return "Stopped"
         }
     }

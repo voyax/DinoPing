@@ -9,6 +9,7 @@ public final class AgentManager {
     public let permissionService = PermissionService()
     private let transcriptReader = TranscriptReader()
     private var discoveryTask: Task<Void, Never>?
+    public private(set) var transcriptWatcher: TranscriptWatcher?
 
     public init() {
         startDiscovery()
@@ -42,7 +43,7 @@ public final class AgentManager {
 
     public var activeSessions: [AgentSession] {
         sessions.values
-            .filter { $0.status != .stopped }
+            .filter { $0.status != .stopped }  // .done is still shown
             .sorted { $0.lastEventTime > $1.lastEventTime }
     }
 
@@ -132,6 +133,10 @@ public final class AgentManager {
         if let existing = sessions[id] { return existing }
         let session = AgentSession(id: id, cwd: cwd)
         sessions[id] = session
+        // Register the new session's transcript for file watching
+        if let url = transcriptReader.transcriptURL(cwd: cwd, sessionId: id) {
+            transcriptWatcher?.watch(path: url.path)
+        }
         return session
     }
 
@@ -172,6 +177,27 @@ public final class AgentManager {
             return true
         }.map(\.key)
         for id in staleIds { sessions.removeValue(forKey: id) }
+    }
+
+    /// Install a file watcher that triggers refreshAllPrompts on transcript
+    /// file writes. Call once at startup; sessions auto-register their files.
+    public func installTranscriptWatcher() {
+        let mgr = self
+        transcriptWatcher = TranscriptWatcher { [weak mgr] in
+            Task { await mgr?.refreshAllPrompts() }
+        }
+        // Watch all current sessions' transcripts
+        updateWatchedPaths()
+    }
+
+    /// Ensure the watcher covers all active session transcripts.
+    public func updateWatchedPaths() {
+        guard let watcher = transcriptWatcher else { return }
+        for session in sessions.values {
+            if let url = transcriptReader.transcriptURL(cwd: session.cwd, sessionId: session.id) {
+                watcher.watch(path: url.path)
+            }
+        }
     }
 
     /// Re-read the latest user prompt + transcript mtime from each session.
@@ -243,14 +269,23 @@ public final class AgentManager {
                 session.missedHeartbeats = 0
             } else {
                 session.missedHeartbeats += 1
-                if session.missedHeartbeats >= 2 {
-                    session.status = .stopped
-                    print("[AgentPulse] 💀 Process \(pid) gone — marking session \(session.projectName) as stopped")
+                if session.missedHeartbeats >= 2, session.status != .done {
+                    session.status = .done
+                    session.lastEventTime = .now  // start the 8s grace timer
+                    print("[AgentPulse] 💀 Process \(pid) gone — \(session.projectName) done")
                 }
             }
         }
-        // Remove stopped sessions
-        let deadIds = sessions.filter { $0.value.status == .stopped }.map(\.key)
-        for id in deadIds { sessions.removeValue(forKey: id) }
+
+        // Remove sessions that have been .done for 8+ seconds, or .stopped.
+        let now = Date.now
+        let removeIds = sessions.filter { _, s in
+            if s.status == .stopped { return true }
+            if s.status == .done {
+                return now.timeIntervalSince(s.lastEventTime) > 8
+            }
+            return false
+        }.map(\.key)
+        for id in removeIds { sessions.removeValue(forKey: id) }
     }
 }

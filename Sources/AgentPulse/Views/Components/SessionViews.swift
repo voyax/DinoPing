@@ -45,6 +45,7 @@ struct SessionHeaderView: View {
         case .waitingForInput: return "Waiting for input"
         case .waitingForPermission: return "Needs permission"
         case .idle: return "Idle"
+        case .done: return "Done"
         case .stopped: return "Stopped"
         }
     }
@@ -134,6 +135,7 @@ struct CompactSessionRow: View {
         case .waitingForPermission: .orange
         case .waitingForInput: .yellow
         case .idle: .gray
+        case .done: .blue.opacity(0.7)
         case .stopped: .red.opacity(0.5)
         }
     }

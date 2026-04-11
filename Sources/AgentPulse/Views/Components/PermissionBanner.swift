@@ -6,6 +6,7 @@ struct PermissionBanner: View {
     let queuePosition: Int
     let queueTotal: Int
     let onAllow: () -> Void
+    let onAlwaysAllow: () -> Void
     let onBypass: () -> Void
     let onDeny: () -> Void
 
@@ -40,12 +41,10 @@ struct PermissionBanner: View {
                 .padding(.horizontal, 10)
                 .padding(.bottom, 8)
 
-            // Action buttons. "Always allow" was removed until rule
-            // persistence ships — leaving a button that silently behaved like
-            // "Allow Once" was misleading.
             HStack(spacing: 6) {
                 PermissionButton(title: "Deny", shortcut: "^N", style: .deny, action: onDeny)
-                PermissionButton(title: "Allow Once", shortcut: "^Y", style: .allow, action: onAllow)
+                PermissionButton(title: "Allow", shortcut: "^Y", style: .allow, action: onAllow)
+                PermissionButton(title: "Always", shortcut: "^A", style: .alwaysAllow, action: onAlwaysAllow)
                 PermissionButton(title: "Bypass", shortcut: "^B", style: .bypass, action: onBypass)
             }
             .padding(.horizontal, 10)
@@ -146,12 +145,13 @@ struct PermissionButton: View {
     let action: () -> Void
 
     enum Style {
-        case deny, allow, bypass
+        case deny, allow, alwaysAllow, bypass
 
         var bgColor: Color {
             switch self {
             case .deny: .white.opacity(0.08)
             case .allow: .white.opacity(0.1)
+            case .alwaysAllow: .blue.opacity(0.25)
             case .bypass: .red.opacity(0.25)
             }
         }
@@ -160,6 +160,7 @@ struct PermissionButton: View {
             switch self {
             case .deny: .white.opacity(0.8)
             case .allow: .white.opacity(0.9)
+            case .alwaysAllow: .blue
             case .bypass: .red
             }
         }

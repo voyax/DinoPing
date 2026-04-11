@@ -28,6 +28,7 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
         case waitingForInput
         case waitingForPermission
         case idle
+        case done      // session ended — shown briefly before removal
         case stopped
     }
 
@@ -60,7 +61,7 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
             status = .active
 
         case .sessionEnded:
-            status = .stopped
+            status = .done
 
         case .toolStarted(let tool):
             currentToolCall = tool
