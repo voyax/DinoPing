@@ -43,5 +43,4 @@ public actor PermissionService {
         earlyResolutions.removeAll()
     }
 
-    public var pendingCount: Int { pending.count }
 }

@@ -109,6 +109,7 @@ final class AppState {
         let mgr = agentManager
         promptPollTask = Task {
             while !Task.isCancelled {
+                guard !Task.isCancelled else { break }
                 try? await Task.sleep(for: .seconds(5))
                 guard !Task.isCancelled else { break }
                 await mgr.refreshAllPrompts()
@@ -345,10 +346,11 @@ final class AppState {
         observeTask?.cancel()
         promptPollTask?.cancel()
 
-        // Trigger pendingPermissions change to unblock observeTask's continuation,
-        // so it checks isCancelled and exits cleanly.
-        agentManager.pendingPermissions.removeAll()
+        // Deny all pending permissions FIRST to unblock any waiting bridge
+        // continuations, THEN clear the list. Reversed order would leave
+        // continuations dangling.
         Task { await agentManager.permissionService.denyAll() }
+        agentManager.pendingPermissions.removeAll()
 
         notchPanel?.teardown()
         notchPanel?.hide()

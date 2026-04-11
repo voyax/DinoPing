@@ -1,5 +1,8 @@
 import Foundation
 
+/// `@unchecked Sendable` because @Observable classes can't be actors.
+/// All mutable access MUST happen on @MainActor (enforced by AgentManager's
+/// MainActor isolation). If you add a new callsite, ensure it runs on main.
 @Observable
 public final class AgentSession: Identifiable, @unchecked Sendable {
     public let id: String

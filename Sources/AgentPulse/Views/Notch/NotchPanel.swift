@@ -77,6 +77,10 @@ final class NotchPanel {
         self.agentManager = agentManager
     }
 
+    // No deinit — @MainActor properties can't be accessed from nonisolated
+    // deinit. Instead, setup() guards against double-install and teardown()
+    // must be called explicitly before the object is released.
+
     func teardown() {
         if let obs = screenObserver {
             NotificationCenter.default.removeObserver(obs)
@@ -102,6 +106,10 @@ final class NotchPanel {
     // MARK: - Setup
 
     func setup() {
+        // Guard against double-install — calling setup() twice without
+        // teardown() would orphan the old monitors.
+        if panel != nil { teardown() }
+
         refreshScreenInfo()
         createPanel()
         installContent()
@@ -174,11 +182,13 @@ final class NotchPanel {
 
     // MARK: - Panel Creation
 
-    /// Maximum content size we will ever need to draw inside the panel.
-    /// Kept intentionally small so the transparent panel covers as little of
-    /// the screen as possible — anything outside this rect is left to the
-    /// other apps. Tweak both numbers if a layout grows larger than this.
-    private static let panelMaxSize = NSSize(width: 540, height: 420)
+    /// Maximum content size — derived from SilhouetteSizing so the panel
+    /// window is always large enough to hold the biggest silhouette plus
+    /// shadow room. Anything outside the visible silhouette is click-through.
+    private static let panelMaxSize = NSSize(
+        width: SilhouetteSizing.expandedWidth + 80,   // 410 + shadow
+        height: SilhouetteSizing.expandedMaxHeight + 40  // 380 + shadow
+    )
 
     private func createPanel() {
         let screen = currentScreen()
@@ -271,15 +281,18 @@ final class NotchPanel {
 
     private func fadeOutPanel() async {
         guard let panel else { return }
+        // NSAnimationContext's completionHandler fires on an arbitrary queue.
+        // We dispatch back to MainActor explicitly before touching the panel
+        // or resuming the continuation (which is MainActor-isolated).
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
                 context.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 panel.animator().alphaValue = 0
             } completionHandler: {
-                Task { @MainActor in
+                DispatchQueue.main.async {
                     panel.orderOut(nil)
-                    panel.alphaValue = 1  // restore for next show
+                    panel.alphaValue = 1
                     continuation.resume()
                 }
             }

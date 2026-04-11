@@ -8,13 +8,14 @@ public final class AgentManager {
     public var pendingPermissions: [PermissionRequest] = []
     public let permissionService = PermissionService()
     private let transcriptReader = TranscriptReader()
+    private var discoveryTask: Task<Void, Never>?
 
     public init() {
         startDiscovery()
     }
 
     private func startDiscovery() {
-        Task {
+        discoveryTask = Task {
             let reader = self.transcriptReader
             let discovered = await Task.detached {
                 let sessions = SessionDiscovery().discoverClaudeCodeSessions()
@@ -216,10 +217,12 @@ public final class AgentManager {
             for (info, prompt) in discovered {
                 // Skip if this session ID already exists
                 guard sessions[info.sessionId] == nil else { continue }
-                // Skip if another session with the same cwd already exists
-                // (e.g., hooks created a session with the real ID while
-                // discovery only has a PID-based fallback ID)
-                guard !existingCwds.contains(info.cwd) else { continue }
+                // Skip PID-based fallback IDs if another session with the
+                // same cwd exists (hooks provide the real ID). But allow
+                // transcript-matched IDs even for the same cwd — those are
+                // genuinely different sessions in the same directory.
+                if info.sessionId.hasPrefix("proc-"),
+                   existingCwds.contains(info.cwd) { continue }
 
                 let session = AgentSession(id: info.sessionId, agentKind: info.agentKind, cwd: info.cwd)
                 session.status = .waitingForInput

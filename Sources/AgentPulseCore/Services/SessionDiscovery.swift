@@ -117,14 +117,16 @@ public struct SessionDiscovery: Sendable {
             return nil
         }
 
-        // Timeout: kill process if it takes too long
-        let deadline = DispatchTime.now() + timeout
-        DispatchQueue.global().asyncAfter(deadline: deadline) {
-            if process.isRunning { process.terminate() }
+        // Timeout: kill process if it takes too long. Use a DispatchWorkItem
+        // so we can cancel the timeout if the process exits normally first.
+        let timeoutItem = DispatchWorkItem { [weak process] in
+            if process?.isRunning == true { process?.terminate() }
         }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        timeoutItem.cancel()  // process finished — no need to fire timeout
         return String(data: data, encoding: .utf8)
     }
 }

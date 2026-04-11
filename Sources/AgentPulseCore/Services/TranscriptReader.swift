@@ -3,6 +3,26 @@ import Foundation
 /// Reads Claude Code session transcripts (.jsonl files) to extract the latest user prompt.
 public struct TranscriptReader: Sendable {
 
+    /// Max bytes to read from the end of the transcript file.
+    private static let tailBytes: UInt64 = 4_194_304  // 4 MB
+
+    /// Max lines to scan backward looking for a user/assistant message.
+    private static let scanLimit = 500
+
+    /// Prefixes that mark a message as system-generated (not user-typed).
+    private static let wrapperPrefixes = [
+        "<command-name>", "<local-command-stdout>", "<command-message>",
+        "<system-reminder>", "<task-notification>",
+        "<user-prompt-submit-hook>",
+        "[Request interrupted",
+        "[Image: source:", "[Image: original",
+    ]
+
+    /// XML tags that may appear inline and should be stripped.
+    private static let inlineTags = [
+        "system-reminder", "task-notification", "user-prompt-submit-hook",
+    ]
+
     public init() {}
 
     /// Returns the most recent user prompt text for a session, or nil if none found.
@@ -17,7 +37,7 @@ public struct TranscriptReader: Sendable {
         // Read a generous tail — transcripts with pasted images can have
         // multi-MB base64 lines that push user prompts far from the end.
         // 4 MB handles files up to ~40 MB with heavy image usage.
-        let tailBytes: UInt64 = 4_194_304
+        let tailBytes = Self.tailBytes
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
 
@@ -30,7 +50,7 @@ public struct TranscriptReader: Sendable {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
         // Cap scan depth — active conversations can have hundreds of
         // tool-result lines between user prompts.
-        let scanLimit = min(lines.count, 500)
+        let scanLimit = min(lines.count, Self.scanLimit)
         for i in 0..<scanLimit {
             let line = lines[lines.count - 1 - i]
             // Large lines may contain base64 image data but ALSO the user's
@@ -70,7 +90,7 @@ public struct TranscriptReader: Sendable {
         let url = transcriptURL(cwd: cwd, sessionId: sessionId)
         guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
 
-        let tailBytes: UInt64 = 4_194_304
+        let tailBytes = Self.tailBytes
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
 
@@ -81,7 +101,7 @@ public struct TranscriptReader: Sendable {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
 
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        let scanLimit = min(lines.count, 500)
+        let scanLimit = min(lines.count, Self.scanLimit)
         for i in 0..<scanLimit {
             let line = lines[lines.count - 1 - i]
             if line.count > 50_000 {
@@ -181,20 +201,10 @@ public struct TranscriptReader: Sendable {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
 
-        // Drop messages that are entirely system/wrapper content — not
-        // something the user typed.
-        let wrapperPrefixes = [
-            "<command-name>", "<local-command-stdout>", "<command-message>",
-            "<system-reminder>", "<task-notification>",
-            "<user-prompt-submit-hook>",
-            "[Request interrupted",
-            "[Image: source:", "[Image: original",
-        ]
-        if wrapperPrefixes.contains(where: { s.hasPrefix($0) }) { return nil }
+        if Self.wrapperPrefixes.contains(where: { s.hasPrefix($0) }) { return nil }
 
         // Strip inline XML blocks that Claude Code wraps around user content.
-        let inlineTags = ["system-reminder", "task-notification", "user-prompt-submit-hook"]
-        for tag in inlineTags {
+        for tag in Self.inlineTags {
             while let start = s.range(of: "<\(tag)>"),
                   let end = s.range(of: "</\(tag)>", range: start.upperBound..<s.endIndex) {
                 s.removeSubrange(start.lowerBound..<end.upperBound)
