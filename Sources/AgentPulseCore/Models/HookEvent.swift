@@ -76,13 +76,15 @@ public enum HookEvent: Sendable {
     case stop(HookPayload)
     case subagentStart(HookPayload)
     case subagentStop(HookPayload)
+    case userPromptSubmit(HookPayload)
 
     public var payload: HookPayload {
         switch self {
         case .sessionStart(let p), .sessionEnd(let p),
              .preToolUse(let p), .postToolUse(let p), .postToolUseFailure(let p),
              .permissionRequest(let p), .notification(let p), .stop(let p),
-             .subagentStart(let p), .subagentStop(let p):
+             .subagentStart(let p), .subagentStop(let p),
+             .userPromptSubmit(let p):
             return p
         }
     }

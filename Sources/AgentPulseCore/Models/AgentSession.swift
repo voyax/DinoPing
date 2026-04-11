@@ -15,6 +15,10 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
     public var lastEventTime: Date
     public var subagentIds: [String]
     public var lastUserPrompt: String?
+    /// First ~120 chars of the most recent assistant response.
+    public var lastAssistantMessage: String?
+    /// Derived from the transcript file's mtime.
+    public var lastActiveTime: Date?
 
     public enum SessionStatus: Sendable {
         case active
@@ -90,10 +94,12 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
 
         case .subagentStopped:
             // A child agent finished — the parent session is still alive.
-            // Earlier this set status = .stopped which then caused the
-            // heartbeat sweep to delete the entire session, making the
-            // notch panel falsely show "No active agents".
             if !subagentIds.isEmpty { subagentIds.removeLast() }
+
+        case .userPromptSubmitted:
+            // The user just sent a message — Claude is about to think/respond.
+            // Mark active so the pill shows "Working..." instead of "Waiting".
+            status = .active
         }
     }
 

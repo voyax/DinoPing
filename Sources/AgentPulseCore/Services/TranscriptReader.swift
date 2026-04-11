@@ -7,15 +7,37 @@ public struct TranscriptReader: Sendable {
 
     /// Returns the most recent user prompt text for a session, or nil if none found.
     /// Looks up `~/.claude/projects/{cwd-encoded}/{sessionId}.jsonl` and scans backward.
+    ///
+    /// Only reads the last `tailBytes` of the file to keep I/O bounded even
+    /// for multi-MB transcripts (called every 5 seconds × N sessions).
     public func latestUserPrompt(cwd: String, sessionId: String) -> String? {
         let url = transcriptURL(cwd: cwd, sessionId: sessionId)
         guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else { return nil }
 
-        // Scan lines from the end for the most recent user message
+        // Read a generous tail — transcripts with pasted images can have
+        // multi-MB base64 lines that push user prompts far from the end.
+        // 4 MB handles files up to ~40 MB with heavy image usage.
+        let tailBytes: UInt64 = 4_194_304
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        let fileSize = handle.seekToEndOfFile()
+        let offset = fileSize > tailBytes ? fileSize - tailBytes : 0
+        handle.seek(toFileOffset: offset)
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        for line in lines.reversed() {
+        // Cap scan depth — active conversations can have hundreds of
+        // tool-result lines between user prompts.
+        let scanLimit = min(lines.count, 500)
+        for i in 0..<scanLimit {
+            let line = lines[lines.count - 1 - i]
+            // Large lines may contain base64 image data but ALSO the user's
+            // typed text. Do a quick substring check before full JSON parse.
+            if line.count > 50_000 {
+                guard line.contains("\"type\":\"user\"") else { continue }
+            }
             if let prompt = extractUserPrompt(from: String(line)) {
                 return prompt
             }
@@ -32,7 +54,91 @@ public struct TranscriptReader: Sendable {
             .appendingPathComponent("\(sessionId).jsonl")
     }
 
+    /// Returns when the transcript file was last modified — a lightweight
+    /// proxy for "when was this session last active?" that doesn't require
+    /// reading the file contents and updates on every message (user,
+    /// assistant, or tool call), not just on hook events.
+    public func transcriptModificationDate(cwd: String, sessionId: String) -> Date? {
+        guard let url = transcriptURL(cwd: cwd, sessionId: sessionId) else { return nil }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return attrs?[.modificationDate] as? Date
+    }
+
+    /// Returns the most recent assistant response text (first ~120 chars).
+    /// Uses the same tail-read approach as `latestUserPrompt`.
+    public func latestAssistantMessage(cwd: String, sessionId: String) -> String? {
+        let url = transcriptURL(cwd: cwd, sessionId: sessionId)
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
+
+        let tailBytes: UInt64 = 4_194_304
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        let fileSize = handle.seekToEndOfFile()
+        let offset = fileSize > tailBytes ? fileSize - tailBytes : 0
+        handle.seek(toFileOffset: offset)
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        let scanLimit = min(lines.count, 500)
+        for i in 0..<scanLimit {
+            let line = lines[lines.count - 1 - i]
+            if line.count > 50_000 {
+                guard line.contains("\"type\":\"assistant\"") else { continue }
+            }
+            if let msg = extractAssistantText(from: String(line)) {
+                return String(msg.prefix(120))
+            }
+        }
+        return nil
+    }
+
     // MARK: - Parsing
+
+    /// Extracts assistant text from one jsonl line. Returns nil if not an assistant message.
+    private func extractAssistantText(from line: String) -> String? {
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        if let type = json["type"] as? String, type != "assistant" { return nil }
+
+        guard let message = json["message"] as? [String: Any],
+              let role = message["role"] as? String, role == "assistant"
+        else { return nil }
+
+        var raw: String?
+        if let blocks = message["content"] as? [[String: Any]] {
+            let text = blocks
+                .compactMap { block -> String? in
+                    guard (block["type"] as? String) == "text" else { return nil }
+                    return block["text"] as? String
+                }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            raw = text.isEmpty ? nil : text
+        } else if let content = message["content"] as? String {
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            raw = trimmed.isEmpty ? nil : trimmed
+        }
+
+        guard var s = raw else { return nil }
+
+        // Strip markdown formatting for clean display
+        s = s.replacingOccurrences(of: #"#{1,6}\s+"#, with: "", options: .regularExpression)  // ## headings
+        s = s.replacingOccurrences(of: #"\*\*([^*]+)\*\*"#, with: "$1", options: .regularExpression)  // **bold**
+        s = s.replacingOccurrences(of: #"\*([^*]+)\*"#, with: "$1", options: .regularExpression)  // *italic*
+        s = s.replacingOccurrences(of: #"`([^`]+)`"#, with: "$1", options: .regularExpression)  // `code`
+        s = s.replacingOccurrences(of: #"^[-*]\s+"#, with: "", options: .regularExpression)  // - list items
+
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Skip very short / generic replies that add no info
+        if s.count < 15 { return nil }
+
+        return s
+    }
 
     /// Extracts user prompt text from one jsonl line. Returns nil if not a real user prompt.
     /// Filters out tool_result messages (those have role=user but are not actual prompts).
@@ -70,28 +176,36 @@ public struct TranscriptReader: Sendable {
         return nil
     }
 
-    /// Strips wrapper tags Claude Code injects (e.g. <command-name>, <local-command-stdout>, system reminders).
+    /// Strips wrapper tags Claude Code injects.
     private func cleanPrompt(_ raw: String) -> String? {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
 
-        // Drop messages that are entirely command/system wrappers.
+        // Drop messages that are entirely system/wrapper content — not
+        // something the user typed.
         let wrapperPrefixes = [
             "<command-name>", "<local-command-stdout>", "<command-message>",
-            "<system-reminder>", "[Request interrupted",
+            "<system-reminder>", "<task-notification>",
+            "<user-prompt-submit-hook>",
+            "[Request interrupted",
             "[Image: source:", "[Image: original",
         ]
         if wrapperPrefixes.contains(where: { s.hasPrefix($0) }) { return nil }
 
-        // Strip any inline <system-reminder>...</system-reminder> blocks
-        while let start = s.range(of: "<system-reminder>"),
-              let end = s.range(of: "</system-reminder>", range: start.upperBound..<s.endIndex) {
-            s.removeSubrange(start.lowerBound..<end.upperBound)
+        // Strip inline XML blocks that Claude Code wraps around user content.
+        let inlineTags = ["system-reminder", "task-notification", "user-prompt-submit-hook"]
+        for tag in inlineTags {
+            while let start = s.range(of: "<\(tag)>"),
+                  let end = s.range(of: "</\(tag)>", range: start.upperBound..<s.endIndex) {
+                s.removeSubrange(start.lowerBound..<end.upperBound)
+            }
+            // Handle unclosed tags at the end
+            if let start = s.range(of: "<\(tag)>") {
+                s.removeSubrange(start.lowerBound..<s.endIndex)
+            }
         }
 
-        // Strip leading image references like "[Image #10]" or "[image #10]"
-        // that Claude Code prepends when the user pastes a screenshot — the
-        // user's *typed* prompt comes after them.
+        // Strip leading image references like "[Image #10]" or "[Image: ...]"
         s = stripLeadingImageMarkers(s)
 
         s = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -100,7 +214,7 @@ public struct TranscriptReader: Sendable {
 
     private func stripLeadingImageMarkers(_ raw: String) -> String {
         var s = raw
-        let pattern = #"^\s*\[[Ii]mage\s*#\d+\]\s*"#
+        let pattern = #"^\s*\[[Ii]mage\s*[#:][^\]]*\]\s*"#
         while let range = s.range(of: pattern, options: .regularExpression) {
             s.removeSubrange(range)
         }

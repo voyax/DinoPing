@@ -14,6 +14,7 @@ public enum AgentEvent: Sendable {
     case stopped
     case subagentStarted(id: String)
     case subagentStopped
+    case userPromptSubmitted
 
     /// Convert a HookEvent into an AgentEvent.
     public static func from(_ hook: HookEvent) -> AgentEvent {
@@ -54,6 +55,8 @@ public enum AgentEvent: Sendable {
             return .subagentStarted(id: p.sessionId)
         case .subagentStop:
             return .subagentStopped
+        case .userPromptSubmit:
+            return .userPromptSubmitted
         }
     }
 }

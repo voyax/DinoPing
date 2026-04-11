@@ -23,7 +23,10 @@ public final class AgentManager {
                     (info, reader.latestUserPrompt(cwd: info.cwd, sessionId: info.sessionId))
                 }
             }.value
+            var seenCwds = Set<String>()
             for (info, prompt) in discovered {
+                guard !seenCwds.contains(info.cwd) else { continue }
+                seenCwds.insert(info.cwd)
                 let session = AgentSession(id: info.sessionId, agentKind: info.agentKind, cwd: info.cwd)
                 session.status = .waitingForInput
                 session.pid = info.pid
@@ -73,15 +76,19 @@ public final class AgentManager {
             session.apply(agentEvent)
             if let latestPrompt { session.lastUserPrompt = latestPrompt }
 
-            // Fix #1: Only add to pendingPermissions here (HTTP hook path).
-            // The bridge /api/approve path does NOT go through handleEvent,
-            // so there is no duplication.
             if case .permissionRequested(let req) = agentEvent {
-                // Deduplicate: don't add if already present
                 if !self.pendingPermissions.contains(where: { $0.id == req.id }) {
                     self.pendingPermissions.append(req)
                 }
             }
+        }
+
+        // Re-read transcript shortly after the hook — hooks often fire
+        // *before* the message is fully written to the jsonl file. A short
+        // delay lets the write complete so we pick up the latest content.
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            await self?.refreshAllPrompts()
         }
 
         return .empty
@@ -152,6 +159,34 @@ public final class AgentManager {
         for id in staleIds { sessions.removeValue(forKey: id) }
     }
 
+    /// Re-read the latest user prompt + transcript mtime from each session.
+    /// Called on a 5-second timer so the notch panel stays current even
+    /// during pure-text conversations where no tool-use hooks fire.
+    nonisolated public func refreshAllPrompts() async {
+        let reader = self.transcriptReader
+        let snapshot = await MainActor.run { Array(self.sessions.values.map { ($0.id, $0.cwd) }) }
+        let results = await Task.detached {
+            snapshot.map { (id, cwd) -> (String, String?, String?, Date?) in
+                let prompt = reader.latestUserPrompt(cwd: cwd, sessionId: id)
+                let reply = reader.latestAssistantMessage(cwd: cwd, sessionId: id)
+                let mtime = reader.transcriptModificationDate(cwd: cwd, sessionId: id)
+                return (id, prompt, reply, mtime)
+            }
+        }.value
+        await MainActor.run {
+            for (id, prompt, reply, mtime) in results {
+                guard let session = self.sessions[id] else { continue }
+                if let prompt, session.lastUserPrompt != prompt {
+                    session.lastUserPrompt = prompt
+                }
+                if let reply, session.lastAssistantMessage != reply {
+                    session.lastAssistantMessage = reply
+                }
+                if let mtime { session.lastActiveTime = mtime }
+            }
+        }
+    }
+
     /// Re-run process discovery to find sessions we may have missed or
     /// cleaned up while the process was still alive. Safe to call anytime.
     public func rediscover() {
@@ -163,14 +198,20 @@ public final class AgentManager {
                     (info, reader.latestUserPrompt(cwd: info.cwd, sessionId: info.sessionId))
                 }
             }.value
+            let existingCwds = Set(sessions.values.map(\.cwd))
             for (info, prompt) in discovered {
-                if sessions[info.sessionId] == nil {
-                    let session = AgentSession(id: info.sessionId, agentKind: info.agentKind, cwd: info.cwd)
-                    session.status = .waitingForInput
-                    session.pid = info.pid
-                    session.lastUserPrompt = prompt
-                    sessions[info.sessionId] = session
-                }
+                // Skip if this session ID already exists
+                guard sessions[info.sessionId] == nil else { continue }
+                // Skip if another session with the same cwd already exists
+                // (e.g., hooks created a session with the real ID while
+                // discovery only has a PID-based fallback ID)
+                guard !existingCwds.contains(info.cwd) else { continue }
+
+                let session = AgentSession(id: info.sessionId, agentKind: info.agentKind, cwd: info.cwd)
+                session.status = .waitingForInput
+                session.pid = info.pid
+                session.lastUserPrompt = prompt
+                sessions[info.sessionId] = session
             }
         }
     }

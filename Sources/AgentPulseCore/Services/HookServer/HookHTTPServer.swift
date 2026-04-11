@@ -75,6 +75,9 @@ public actor HookHTTPServer {
         router.post("hooks/subagent-stop") { request, context -> Response in
             try await handler.handleRoute(request: request, context: context, eventType: .subagentStop)
         }
+        router.post("hooks/user-prompt-submit") { request, context -> Response in
+            try await handler.handleRoute(request: request, context: context, eventType: .userPromptSubmit)
+        }
 
         // Bridge approval endpoint: blocks until user decides in notch UI.
         // Bridge CLI POSTs here and waits. When user clicks Allow/Deny,
@@ -217,6 +220,7 @@ public actor HookHTTPServer {
         case preToolUse, postToolUse, postToolUseFailure
         case permissionRequest, notification
         case stop, subagentStart, subagentStop
+        case userPromptSubmit
     }
 
     /// Invoke the registered debug handler and wrap its return as a JSON Response.
@@ -268,6 +272,7 @@ public actor HookHTTPServer {
         case .stop: .stop(payload)
         case .subagentStart: .subagentStart(payload)
         case .subagentStop: .subagentStop(payload)
+        case .userPromptSubmit: .userPromptSubmit(payload)
         }
 
         print("[AgentPulse] ✅ Parsed: \(payload.hookEventName) session=\(payload.sessionId.prefix(8)) tool=\(payload.toolName ?? "none")")

@@ -293,6 +293,15 @@ struct SessionCard: View {
                         .italic()
                 }
 
+                // Show assistant's latest reply (truncated) when available
+                if let reply = session.lastAssistantMessage, !reply.isEmpty {
+                    Text(reply)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
                 // Row 3: agent kind + status as a single subtle line
                 HStack(spacing: 6) {
                     Text(session.agentKind.displayName)
@@ -366,10 +375,12 @@ struct SessionCard: View {
         }
     }
 
-    /// Shows time since last activity, not session start. A session that
-    /// started 2 hours ago but had a tool call 30 seconds ago shows "<1m".
+    /// Time since the transcript file was last written to. Updates on every
+    /// message (user, assistant, tool call) — not just hook events — so it
+    /// stays accurate during pure-text conversations.
     private var elapsedText: String {
-        let seconds = Int(Date.now.timeIntervalSince(session.lastEventTime))
+        let ref = session.lastActiveTime ?? session.lastEventTime
+        let seconds = Int(Date.now.timeIntervalSince(ref))
         if seconds < 60 { return "<1m" }
         if seconds < 3600 { return "\(seconds / 60)m" }
         return "\(seconds / 3600)h"

@@ -43,6 +43,7 @@ public struct HookInstaller {
             ("Stop", "stop", 5),
             ("SubagentStart", "subagent-start", 5),
             ("SubagentStop", "subagent-stop", 5),
+            ("UserPromptSubmit", "user-prompt-submit", 5),
         ]
 
         for config in httpHookConfigs {

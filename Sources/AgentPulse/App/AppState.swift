@@ -12,6 +12,7 @@ final class AppState {
     private var serverTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
     private var observeTask: Task<Void, Never>?
+    private var promptPollTask: Task<Void, Never>?
 
     init() {
         startServices()
@@ -99,6 +100,17 @@ final class AppState {
                 if tick % 2 == 0 {
                     self.agentManager.rediscover()
                 }
+            }
+        }
+
+        // Poll transcript files every 5s to keep the prompt subtitle fresh
+        // even when the conversation is pure text (no tool calls → no hooks).
+        let mgr = agentManager
+        promptPollTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { break }
+                await mgr.refreshAllPrompts()
             }
         }
 
@@ -321,6 +333,7 @@ final class AppState {
         serverTask?.cancel()
         cleanupTask?.cancel()
         observeTask?.cancel()
+        promptPollTask?.cancel()
 
         // Trigger pendingPermissions change to unblock observeTask's continuation,
         // so it checks isCancelled and exits cleanly.
