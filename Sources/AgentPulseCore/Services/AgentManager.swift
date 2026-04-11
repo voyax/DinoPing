@@ -143,7 +143,10 @@ public final class AgentManager {
     /// "test-" or "debug-session"). Prevents test artifacts from cluttering
     /// the real session list.
     public func cleanupTestSessions() {
-        let testIds = sessions.keys.filter { $0.hasPrefix("test-") || $0 == "debug-session" }
+        let testPrefixes = ["test-", "debug-", "manual-", "fake-"]
+        let testIds = sessions.keys.filter { id in
+            testPrefixes.contains(where: { id.hasPrefix($0) })
+        }
         for id in testIds { sessions.removeValue(forKey: id) }
     }
 
