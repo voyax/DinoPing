@@ -8,7 +8,7 @@ public struct ToolCall: Identifiable, Sendable {
     public var endTime: Date?
     public var status: Status
 
-    public enum Status: Sendable {
+    public enum Status: Sendable, Equatable {
         case running
         case succeeded
         case failed(String)

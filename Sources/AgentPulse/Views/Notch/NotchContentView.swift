@@ -338,8 +338,11 @@ struct SessionCard: View {
                         .italic()
                 }
 
-                // Show assistant's latest reply (truncated) when available
-                if let reply = session.lastAssistantMessage, !reply.isEmpty {
+                // Activity feed: recent tool calls (last 3 visible)
+                if !session.recentTools.isEmpty {
+                    ActivityFeedView(tools: Array(session.recentTools.prefix(3)))
+                        .padding(.top, 2)
+                } else if let reply = session.lastAssistantMessage, !reply.isEmpty {
                     Text(reply)
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.45))
@@ -400,6 +403,73 @@ struct SessionCard: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
 
+}
+
+// MARK: - Activity Feed
+
+struct ActivityFeedView: View {
+    let tools: [ToolCall]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(tools) { tool in
+                ActivityRow(tool: tool)
+            }
+        }
+    }
+}
+
+struct ActivityRow: View {
+    let tool: ToolCall
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: iconName)
+                .font(.system(size: 8))
+                .foregroundStyle(.white.opacity(0.35))
+                .frame(width: 10)
+            Text(tool.displayDescription)
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(0.4))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            statusIcon
+        }
+    }
+
+    private var iconName: String {
+        switch tool.toolName {
+        case "Bash": "terminal"
+        case "Read": "doc.text"
+        case "Edit": "pencil.line"
+        case "Write": "doc.badge.plus"
+        case "Glob", "Grep": "magnifyingglass"
+        case "Agent": "person.2"
+        default: "gearshape"
+        }
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch tool.status {
+        case .succeeded:
+            Image(systemName: "checkmark")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.green.opacity(0.6))
+        case .failed:
+            Image(systemName: "xmark")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.red.opacity(0.6))
+        case .running:
+            Circle()
+                .fill(.green)
+                .frame(width: 5, height: 5)
+        }
+    }
+}
+
+extension SessionCard {
     private var statusColor: Color {
         switch session.status {
         case .active: .green
@@ -413,7 +483,12 @@ struct SessionCard: View {
 
     private var statusText: String {
         switch session.status {
-        case .active: return "Working..."
+        case .active:
+            // Show current tool call if running, otherwise generic "Working..."
+            if let tool = session.currentToolCall, tool.status == .running {
+                return tool.displayDescription
+            }
+            return "Working..."
         case .waitingForInput: return "Waiting for input"
         case .waitingForPermission: return "Needs permission"
         case .idle: return "Idle"

@@ -20,6 +20,9 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
     public var lastUserPrompt: String?
     /// First ~120 chars of the most recent assistant response.
     public var lastAssistantMessage: String?
+    /// Recent tool call history (last 5). Newest first.
+    public var recentTools: [ToolCall] = []
+    private static let maxRecentTools = 5
     /// Derived from the transcript file's mtime.
     public var lastActiveTime: Date?
 
@@ -70,11 +73,24 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
         case .toolSucceeded:
             currentToolCall?.status = .succeeded
             currentToolCall?.endTime = .now
+            // Archive to recent history
+            if let completed = currentToolCall {
+                recentTools.insert(completed, at: 0)
+                if recentTools.count > Self.maxRecentTools {
+                    recentTools.removeLast()
+                }
+            }
             status = .active
 
         case .toolFailed(let reason):
             currentToolCall?.status = .failed(reason)
             currentToolCall?.endTime = .now
+            if let completed = currentToolCall {
+                recentTools.insert(completed, at: 0)
+                if recentTools.count > Self.maxRecentTools {
+                    recentTools.removeLast()
+                }
+            }
 
         case .permissionRequested(let req):
             status = .waitingForPermission
