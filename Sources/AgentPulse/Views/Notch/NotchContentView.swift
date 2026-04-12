@@ -338,15 +338,16 @@ struct SessionCard: View {
                         .italic()
                 }
 
-                // Activity feed: recent tool calls (last 3 visible)
-                if !session.recentTools.isEmpty {
+                // When active: show tool call activity feed
+                // When idle/waiting: show Claude's last reply (what it concluded)
+                if session.status == .active, !session.recentTools.isEmpty {
                     ActivityFeedView(tools: Array(session.recentTools.prefix(3)))
                         .padding(.top, 2)
                 } else if let reply = session.lastAssistantMessage, !reply.isEmpty {
                     Text(reply)
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.45))
-                        .lineLimit(1)
+                        .lineLimit(2)
                         .truncationMode(.tail)
                 }
 
