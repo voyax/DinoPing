@@ -498,14 +498,17 @@ extension SessionCard {
         }
     }
 
-    /// Time since the transcript file was last written to. Updates on every
-    /// message (user, assistant, tool call) — not just hook events — so it
-    /// stays accurate during pure-text conversations.
     private var elapsedText: String {
         let ref = session.lastActiveTime ?? session.lastEventTime
         let seconds = Int(Date.now.timeIntervalSince(ref))
-        if seconds < 60 { return "<1m" }
+        if seconds < 60 { return "just now" }
         if seconds < 3600 { return "\(seconds / 60)m" }
-        return "\(seconds / 3600)h"
+        if seconds < 86400 { return "\(seconds / 3600)h" }
+        let days = seconds / 86400
+        if days == 1 { return "yesterday" }
+        if days < 7 { return "\(days)d ago" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: ref)
     }
 }
