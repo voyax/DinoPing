@@ -498,17 +498,21 @@ extension SessionCard {
         }
     }
 
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
     private var elapsedText: String {
         let ref = session.lastActiveTime ?? session.lastEventTime
-        let seconds = Int(Date.now.timeIntervalSince(ref))
+        let seconds = max(0, Int(Date.now.timeIntervalSince(ref)))
         if seconds < 60 { return "just now" }
         if seconds < 3600 { return "\(seconds / 60)m" }
         if seconds < 86400 { return "\(seconds / 3600)h" }
         let days = seconds / 86400
         if days == 1 { return "yesterday" }
         if days < 7 { return "\(days)d ago" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return formatter.string(from: ref)
+        return Self.dateFormatter.string(from: ref)
     }
 }
