@@ -419,9 +419,12 @@ struct ActivityFeedView: View {
     let tools: [ToolCall]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(tools) { tool in
-                ActivityRow(tool: tool)
+        // TimelineView ticks every second so running tool durations update live.
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(tools) { tool in
+                    ActivityRow(tool: tool, tick: context.date)
+                }
             }
         }
     }
@@ -429,6 +432,7 @@ struct ActivityFeedView: View {
 
 struct ActivityRow: View {
     let tool: ToolCall
+    let tick: Date  // from TimelineView for live elapsed updates
 
     var body: some View {
         HStack(spacing: 5) {
@@ -442,19 +446,19 @@ struct ActivityRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
-            Text(toolDuration)
+            Text(toolDuration(tick: tick))
                 .font(.system(size: 9))
                 .foregroundStyle(.white.opacity(0.3))
             statusIcon
         }
     }
 
-    private var toolDuration: String {
+    private func toolDuration(tick: Date) -> String {
         guard let end = tool.endTime else {
-            let seconds = Int(Date.now.timeIntervalSince(tool.startTime))
+            let seconds = max(0, Int(tick.timeIntervalSince(tool.startTime)))
             return seconds < 1 ? "<1s" : "\(seconds)s"
         }
-        let ms = Int(end.timeIntervalSince(tool.startTime) * 1000)
+        let ms = max(0, Int(end.timeIntervalSince(tool.startTime) * 1000))
         if ms < 100 { return "instant" }
         if ms < 1000 { return "\(ms)ms" }
         return "\(ms / 1000)s"
