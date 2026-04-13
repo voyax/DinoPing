@@ -35,8 +35,8 @@ final class AgentPulsePanel: NSPanel {
     }
 
     @objc func menuDeleteRule(_ sender: NSMenuItem) {
-        guard let toolName = sender.representedObject as? String else { return }
-        AllowRules.remove(toolName: toolName)
+        guard let idx = sender.representedObject as? Int else { return }
+        AllowRules.removeAt(index: idx)
     }
 }
 
@@ -161,7 +161,12 @@ final class NotchPanel {
         cancelAllTasks()
         ensurePanelVisible()
         panelState.displayState = .expanded
-        // Accept key events when expanded so ^Y/^N/^A/^B shortcuts work.
+        makeKeyIfPermissions()
+    }
+
+    /// Make the panel key window so keyboard shortcuts work. Safe to call
+    /// anytime — no-ops if no permissions or panel is nil.
+    func makeKeyIfPermissions() {
         if !agentManager.pendingPermissions.isEmpty {
             panel?.makeKey()
         }
@@ -614,7 +619,7 @@ final class NotchPanel {
             let rulesHeader = NSMenuItem(title: "Allow Rules", action: nil, keyEquivalent: "")
             rulesHeader.isEnabled = false
             menu.addItem(rulesHeader)
-            for rule in rules {
+            for (idx, rule) in rules.enumerated() {
                 let desc = "\(rule.toolName): \(rule.pattern ?? "*")"
                 let item = NSMenuItem(
                     title: desc,
@@ -622,7 +627,7 @@ final class NotchPanel {
                     keyEquivalent: ""
                 )
                 item.target = panel
-                item.representedObject = rule.toolName
+                item.representedObject = idx  // index into the rules array
                 menu.addItem(item)
             }
         }

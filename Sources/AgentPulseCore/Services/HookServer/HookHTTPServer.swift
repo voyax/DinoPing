@@ -84,7 +84,7 @@ public actor HookHTTPServer {
         // the response is sent back and bridge forwards it to Claude Code.
         router.post("api/approve") { request, context -> Response in
             let body = try await request.body.collect(upTo: 1_048_576)
-            let rawBody = String(data: Data(buffer: body), encoding: .utf8) ?? ""
+            _ = String(data: Data(buffer: body), encoding: .utf8) ?? ""
             let agentType = request.headers[.init("X-Agent-Type")!] ?? "claude"
             print("[AgentPulse] 🔔 Bridge approval request from \(agentType)")
 
@@ -172,10 +172,10 @@ public actor HookHTTPServer {
         router.post("debug/test/permission") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "test:permission")
         }
-        #endif
         router.post("debug/test/many-sessions") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "test:many-sessions")
         }
+        #endif
 
         #if DEBUG
         // Test endpoint: simulate full bridge approval flow.
@@ -250,7 +250,6 @@ public actor HookHTTPServer {
     ) async throws -> Response {
         let body = try await request.body.collect(upTo: 1_048_576) // 1MB max
 
-        // Print raw request to stdout for debugging
         let rawBody = String(data: Data(buffer: body), encoding: .utf8) ?? "<binary>"
         print("[AgentPulse] 📥 \(eventType) received, body=\(rawBody.prefix(200))")
 

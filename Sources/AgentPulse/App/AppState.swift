@@ -328,10 +328,16 @@ final class AppState {
             break
         }
 
-        // Permission alert sound — only when count increases (0→1, 1→2, etc.)
+        // Permission alert sound + keyboard focus
         let permCount = agentManager.pendingPermissions.count
         if permCount > lastKnownPermCount {
             SoundManager.shared.play(.permissionNeeded)
+            // If panel is already expanded, make it key so ^Y/^N work
+            // (transitionToExpanded only does this on expand, not on
+            // permission arrival while already expanded).
+            if panel.panelState.displayState == .expanded {
+                panel.makeKeyIfPermissions()
+            }
         }
         lastKnownPermCount = permCount
     }

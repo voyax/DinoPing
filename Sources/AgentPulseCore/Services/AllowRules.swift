@@ -53,12 +53,22 @@ public struct AllowRules: Sendable {
         save(rules)
     }
 
-    /// Remove rules matching a tool name (thread-safe).
+    /// Remove all rules matching a tool name (thread-safe).
     public static func remove(toolName: String) {
         lock.lock()
         defer { lock.unlock() }
         var rules = load()
         rules.removeAll { $0.toolName == toolName }
+        save(rules)
+    }
+
+    /// Remove a single rule by index (thread-safe).
+    public static func removeAt(index: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        var rules = load()
+        guard index >= 0, index < rules.count else { return }
+        rules.remove(at: index)
         save(rules)
     }
 
