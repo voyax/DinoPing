@@ -117,9 +117,11 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
             if !subagentIds.isEmpty { subagentIds.removeLast() }
 
         case .userPromptSubmitted:
-            // The user just sent a message — Claude is about to think/respond.
-            // Mark active so the pill shows "Working..." instead of "Waiting".
+            // New turn — clear stale tool history from the previous exchange
+            // so the activity feed starts fresh for this round.
             status = .active
+            recentTools = []
+            currentToolCall = nil
         }
     }
 
