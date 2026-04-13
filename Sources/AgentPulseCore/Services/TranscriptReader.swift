@@ -108,7 +108,7 @@ public struct TranscriptReader: Sendable {
                 guard line.contains("\"type\":\"assistant\"") else { continue }
             }
             if let msg = extractAssistantText(from: String(line)) {
-                return String(msg.prefix(120))
+                return msg
             }
         }
         return nil
@@ -146,18 +146,22 @@ public struct TranscriptReader: Sendable {
         guard var s = raw else { return nil }
 
         // Strip markdown formatting for clean display
-        s = s.replacingOccurrences(of: #"#{1,6}\s+"#, with: "", options: .regularExpression)  // ## headings
-        s = s.replacingOccurrences(of: #"\*\*([^*]+)\*\*"#, with: "$1", options: .regularExpression)  // **bold**
-        s = s.replacingOccurrences(of: #"\*([^*]+)\*"#, with: "$1", options: .regularExpression)  // *italic*
-        s = s.replacingOccurrences(of: #"`([^`]+)`"#, with: "$1", options: .regularExpression)  // `code`
-        s = s.replacingOccurrences(of: #"^[-*]\s+"#, with: "", options: .regularExpression)  // - list items
+        s = s.replacingOccurrences(of: #"#{1,6}\s+"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\*\*([^*]+)\*\*"#, with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\*([^*]+)\*"#, with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"`([^`]+)`"#, with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"^[-*]\s+"#, with: "", options: .regularExpression)
 
         s = s.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Skip very short / generic replies that add no info
         if s.count < 15 { return nil }
 
-        return s
+        // Take the LAST meaningful paragraph — the conclusion is more
+        // useful than the opening line when displayed in the notch.
+        let paragraphs = s.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("|") && $0.count >= 10 }
+        let conclusion = paragraphs.last ?? s
+        return String(conclusion.prefix(200))
     }
 
     /// Extracts user prompt text from one jsonl line. Returns nil if not a real user prompt.
