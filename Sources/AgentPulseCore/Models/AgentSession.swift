@@ -117,11 +117,11 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
             if !subagentIds.isEmpty { subagentIds.removeLast() }
 
         case .userPromptSubmitted:
-            // New turn — clear stale tool history from the previous exchange
-            // so the activity feed starts fresh for this round.
+            // New turn — clear all stale state from the previous exchange.
             status = .active
             recentTools = []
             currentToolCall = nil
+            lastAssistantMessage = nil
         }
     }
 
