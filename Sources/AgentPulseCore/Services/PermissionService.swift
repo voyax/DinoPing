@@ -15,16 +15,28 @@ public actor PermissionService {
 
     public init() {}
 
-    /// Block until the user makes a decision in the notch UI.
+    /// Block until the user makes a decision in the notch UI, or auto-deny
+    /// after 180 seconds (bridge timeout is 120s, so this is a safety net
+    /// for orphaned continuations).
     public func awaitDecision(for requestId: String) async -> PermissionDecision {
-        // Fix #2: check if resolution already arrived
         if let early = earlyResolutions.removeValue(forKey: requestId) {
             return early
         }
 
-        return await withCheckedContinuation { continuation in
+        // Start a timeout that auto-denies if the user doesn't respond.
+        // If the user decides first, the timeout task is cancelled.
+        let timeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(180))
+            guard !Task.isCancelled else { return }
+            await self?.resolve(requestId: requestId, decision: .deny(reason: "Timed out"))
+        }
+
+        let decision = await withCheckedContinuation { continuation in
             pending[requestId] = continuation
         }
+
+        timeoutTask.cancel()
+        return decision
     }
 
     /// Resume a pending decision. Safe to call multiple times — second+

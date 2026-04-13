@@ -10,6 +10,8 @@ public final class TranscriptWatcher: @unchecked Sendable {
     private var sources: [String: (source: DispatchSourceFileSystemObject, fd: Int32)] = [:]
     private let queue = DispatchQueue(label: "agentpulse.transcript-watcher")
     private let onChange: @Sendable () -> Void
+    private var debounceItem: DispatchWorkItem?
+    private static let debounceInterval: TimeInterval = 0.3
 
     public init(onChange: @escaping @Sendable () -> Void) {
         self.onChange = onChange
@@ -32,15 +34,20 @@ public final class TranscriptWatcher: @unchecked Sendable {
                 guard let self else { return }
                 let flags = source.data
                 if flags.contains(.delete) || flags.contains(.rename) {
-                    // File was replaced — re-register for the new inode
                     source.cancel()
                     self.sources.removeValue(forKey: path)
-                    // Brief delay for the new file to appear
                     self.queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                         self?.watch(path: path)
                     }
                 }
-                self.onChange()
+                // Debounce: coalesce rapid writes (e.g., burst of tool calls)
+                // into a single onChange callback after 300ms of quiet.
+                self.debounceItem?.cancel()
+                let item = DispatchWorkItem { [weak self] in
+                    self?.onChange()
+                }
+                self.debounceItem = item
+                self.queue.asyncAfter(deadline: .now() + Self.debounceInterval, execute: item)
             }
             source.setCancelHandler {
                 close(fd)

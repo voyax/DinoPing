@@ -177,6 +177,12 @@ public struct HookInstaller {
     }
 
     private func writeJSONFile(_ json: [String: Any], to url: URL) throws {
+        // Backup before writing — a corrupted settings.json breaks Claude Code.
+        let backup = url.appendingPathExtension("bak")
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: backup)
+            try? FileManager.default.copyItem(at: url, to: backup)
+        }
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: .atomic)
     }

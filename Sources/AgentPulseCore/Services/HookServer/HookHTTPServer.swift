@@ -116,16 +116,31 @@ public actor HookHTTPServer {
             "ok"
         }
 
-        // Debug endpoints — drive runtime state from curl, no UI clicks needed.
-        // Examples:
-        //   curl http://127.0.0.1:21477/debug/state
-        //   curl -X POST http://127.0.0.1:21477/debug/state/expanded
-        //   curl http://127.0.0.1:21477/debug/sessions
-        //   curl -X POST http://127.0.0.1:21477/debug/permissions/clear
-        //   curl http://127.0.0.1:21477/debug/screens
+        // Read-only debug endpoints — always available.
         router.get("debug/state") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "state")
         }
+        router.get("debug/sessions") { _, _ -> Response in
+            await Self.debugResponse(handler: handler, command: "sessions")
+        }
+        router.get("debug/screens") { _, _ -> Response in
+            await Self.debugResponse(handler: handler, command: "screens")
+        }
+        router.get("debug/hittest") { request, _ -> Response in
+            let query = request.uri.queryParameters
+            let x = query["x"].flatMap { Double($0) } ?? 0
+            let y = query["y"].flatMap { Double($0) } ?? 0
+            return await Self.debugResponse(handler: handler, command: "hittest:\(x),\(y)")
+        }
+        router.get("debug/cursor") { _, _ -> Response in
+            await Self.debugResponse(handler: handler, command: "cursor")
+        }
+
+        #if DEBUG
+        // Mutable debug endpoints — only in debug builds. These can
+        // manipulate state and approve permissions, so they must not
+        // be available in release builds (an agent could curl them to
+        // bypass the approval UI).
         router.post("debug/state/dormant") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "set:dormant")
         }
@@ -134,9 +149,6 @@ public actor HookHTTPServer {
         }
         router.post("debug/state/expanded") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "set:expanded")
-        }
-        router.get("debug/sessions") { _, _ -> Response in
-            await Self.debugResponse(handler: handler, command: "sessions")
         }
         router.post("debug/permissions/clear") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "permissions:clear")
@@ -147,24 +159,9 @@ public actor HookHTTPServer {
         router.post("debug/sessions/clear") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "sessions:clear")
         }
-        router.get("debug/screens") { _, _ -> Response in
-            await Self.debugResponse(handler: handler, command: "screens")
-        }
-        router.get("debug/hittest") { request, _ -> Response in
-            // Query string: ?x=...&y=...
-            let query = request.uri.queryParameters
-            let x = query["x"].flatMap { Double($0) } ?? 0
-            let y = query["y"].flatMap { Double($0) } ?? 0
-            return await Self.debugResponse(handler: handler, command: "hittest:\(x),\(y)")
-        }
-        router.get("debug/cursor") { _, _ -> Response in
-            await Self.debugResponse(handler: handler, command: "cursor")
-        }
         router.post("debug/display") { request, _ -> Response in
-            // Body: {"name":"Built-in Retina Display"} or empty for "auto"
             let body = try await request.body.collect(upTo: 4096)
             let raw = String(data: Data(buffer: body), encoding: .utf8) ?? ""
-            // Naive: extract value of "name" key
             var name = ""
             if let r = raw.range(of: "\"name\":\""),
                let end = raw.range(of: "\"", range: r.upperBound..<raw.endIndex) {
@@ -175,10 +172,12 @@ public actor HookHTTPServer {
         router.post("debug/test/permission") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "test:permission")
         }
+        #endif
         router.post("debug/test/many-sessions") { _, _ -> Response in
             await Self.debugResponse(handler: handler, command: "test:many-sessions")
         }
 
+        #if DEBUG
         // Test endpoint: simulate full bridge approval flow.
         // Open http://127.0.0.1:21477/test/approve in browser.
         // Browser will BLOCK until you click Allow/Deny in the notch.
@@ -214,6 +213,7 @@ public actor HookHTTPServer {
                 body: .init(byteBuffer: .init(data: data))
             )
         }
+        #endif
 
         return router
     }

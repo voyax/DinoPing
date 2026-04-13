@@ -33,6 +33,11 @@ final class AgentPulsePanel: NSPanel {
         guard let panel = sender.representedObject as? NotchPanel else { return }
         panel.applyDisplayPreference(nil)
     }
+
+    @objc func menuDeleteRule(_ sender: NSMenuItem) {
+        guard let toolName = sender.representedObject as? String else { return }
+        AllowRules.remove(toolName: toolName)
+    }
 }
 
 // (No NSHostingView subclass needed — click-through is handled at the panel
@@ -71,6 +76,7 @@ final class NotchPanel {
     private var localMouseMonitor: Any?
     private var globalRightClickMonitor: Any?
     private var localRightClickMonitor: Any?
+    private var localKeyMonitor: Any?
     private var lastMouseInSilhouette: Bool = false
 
     init(agentManager: AgentManager) {
@@ -90,6 +96,7 @@ final class NotchPanel {
         if let m = localMouseMonitor { NSEvent.removeMonitor(m); localMouseMonitor = nil }
         if let m = globalRightClickMonitor { NSEvent.removeMonitor(m); globalRightClickMonitor = nil }
         if let m = localRightClickMonitor { NSEvent.removeMonitor(m); localRightClickMonitor = nil }
+        if let m = localKeyMonitor { NSEvent.removeMonitor(m); localKeyMonitor = nil }
         cancelAllTasks()
     }
 
@@ -154,6 +161,10 @@ final class NotchPanel {
         cancelAllTasks()
         ensurePanelVisible()
         panelState.displayState = .expanded
+        // Accept key events when expanded so ^Y/^N/^A/^B shortcuts work.
+        if !agentManager.pendingPermissions.isEmpty {
+            panel?.makeKey()
+        }
     }
 
     func hide() {
@@ -376,6 +387,43 @@ final class NotchPanel {
             Task { @MainActor in self?.updateMouseState() }
             return event
         }
+
+        // Keyboard shortcuts for permission approval. The panel must be key
+        // window to receive these (done via makeKey in transitionToExpanded).
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            // Local monitor runs on main thread = MainActor. Call directly.
+            return self.handleKeyEvent(event) ? nil : event
+        }
+    }
+
+    /// Handle ^Y (allow), ^N (deny), ^A (always allow), ^B (bypass) for
+    /// the first pending permission. Returns true if the event was consumed.
+    private func handleKeyEvent(_ event: NSEvent) -> Bool {
+        guard panelState.displayState == .expanded else { return false }
+        guard !agentManager.pendingPermissions.isEmpty else { return false }
+        guard event.modifierFlags.contains(.control) else { return false }
+
+        let perm = agentManager.pendingPermissions[0]
+        switch event.charactersIgnoringModifiers {
+        case "y":
+            agentManager.approvePermission(id: perm.id)
+            return true
+        case "n":
+            agentManager.denyPermission(id: perm.id)
+            return true
+        case "a":
+            let input = perm.toolInput.mapValues { $0.value }
+            let pattern = AllowRules.primaryArg(toolName: perm.toolName, input: input)
+            AllowRules.add(.init(toolName: perm.toolName, pattern: pattern))
+            agentManager.approvePermission(id: perm.id)
+            return true
+        case "b":
+            agentManager.bypassPermission(id: perm.id)
+            return true
+        default:
+            return false
+        }
     }
 
     /// Compute whether the cursor is currently inside the visible silhouette
@@ -557,6 +605,26 @@ final class NotchPanel {
             item.representedObject = NotchPanelMenuPick(panel: self, name: name)
             if DisplayPreference.preferredName == name { item.state = .on }
             menu.addItem(item)
+        }
+
+        // Allow Rules
+        let rules = AllowRules.load()
+        if !rules.isEmpty {
+            menu.addItem(.separator())
+            let rulesHeader = NSMenuItem(title: "Allow Rules", action: nil, keyEquivalent: "")
+            rulesHeader.isEnabled = false
+            menu.addItem(rulesHeader)
+            for rule in rules {
+                let desc = "\(rule.toolName): \(rule.pattern ?? "*")"
+                let item = NSMenuItem(
+                    title: desc,
+                    action: #selector(AgentPulsePanel.menuDeleteRule(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = panel
+                item.representedObject = rule.toolName
+                menu.addItem(item)
+            }
         }
 
         // Quit

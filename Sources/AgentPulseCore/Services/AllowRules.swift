@@ -17,10 +17,12 @@ public struct AllowRules: Sendable {
 
     public struct AllowRule: Codable, Sendable, Equatable {
         public let toolName: String        // e.g. "Bash", "Edit", "Write"
-        public let pattern: String?        // optional glob for command/path
+        public let pattern: String?        // glob for command/path ("*" = all)
         public let createdAt: Date
 
-        public init(toolName: String, pattern: String? = nil) {
+        /// Pattern is required — no default nil. Callers must explicitly
+        /// pass "*" if they want to match all invocations.
+        public init(toolName: String, pattern: String) {
             self.toolName = toolName
             self.pattern = pattern
             self.createdAt = .now
