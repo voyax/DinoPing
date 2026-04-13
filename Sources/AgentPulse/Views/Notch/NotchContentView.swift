@@ -442,8 +442,24 @@ struct ActivityRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
+            if let duration = toolDuration {
+                Text(duration)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.3))
+            }
             statusIcon
         }
+    }
+
+    private var toolDuration: String? {
+        guard let end = tool.endTime else {
+            // Still running — show elapsed
+            let seconds = Int(Date.now.timeIntervalSince(tool.startTime))
+            return seconds >= 1 ? "\(seconds)s" : nil
+        }
+        let seconds = Int(end.timeIntervalSince(tool.startTime))
+        if seconds < 1 { return nil }  // instant — don't clutter
+        return "\(seconds)s"
     }
 
     private var iconName: String {
