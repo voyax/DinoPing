@@ -146,14 +146,16 @@ public struct TranscriptReader: Sendable {
         guard var s = raw else { return nil }
 
         // Strip markdown formatting for clean display
-        s = s.replacingOccurrences(of: #"#{1,6}\s+"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?m)^#{1,6}\s+"#, with: "", options: .regularExpression)
         s = s.replacingOccurrences(of: #"\*\*([^*]+)\*\*"#, with: "$1", options: .regularExpression)
         s = s.replacingOccurrences(of: #"\*([^*]+)\*"#, with: "$1", options: .regularExpression)
         s = s.replacingOccurrences(of: #"`([^`]+)`"#, with: "$1", options: .regularExpression)
         s = s.replacingOccurrences(of: #"^[-*]\s+"#, with: "", options: .regularExpression)
 
         s = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.count < 15 { return nil }
+        // Only skip truly empty/useless replies — short ones like "Done."
+        // or "Fixed." are still informative.
+        if s.count < 3 { return nil }
 
         // Take the LAST meaningful paragraph — the conclusion is more
         // useful than the opening line when displayed in the notch.

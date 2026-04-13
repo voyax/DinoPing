@@ -325,10 +325,9 @@ final class NotchPanel {
         if let notch = NSScreen.screens.first(where: { $0.hasNotch }) {
             return notch
         }
-        if let primary = NSScreen.screens.first {
-            return primary
-        }
-        return NSScreen.main ?? NSScreen.screens[0]
+        // screens.first covers all real scenarios. This return is unreachable
+        // for a running GUI app but satisfies the compiler.
+        return NSScreen.screens.first ?? NSScreen.main!
     }
 
     private func refreshScreenInfo() {

@@ -12,6 +12,7 @@ final class AppState {
     private var serverTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
     private var observeTask: Task<Void, Never>?
+    private var lastKnownPermCount = 0
 
     init() {
         startServices()
@@ -315,7 +316,6 @@ final class AppState {
     /// small pill to act on the permission.
     private func updatePanelState(panel: NotchPanel) {
         let sessions = agentManager.activeSessions
-        let hasPermissions = agentManager.hasPendingPermissions
         let currentState = panel.panelState.displayState
 
         switch currentState {
@@ -328,16 +328,12 @@ final class AppState {
             break
         }
 
-        // Permission alert sound — fires once when permission count goes 0→1.
-        if hasPermissions, currentState != .expanded {
-            // Don't double-play if user is already looking at the panel.
-            // (The de-dupe relies on observeAgentState only firing this on
-            // changes; it's not a perfect once-per-permission semaphore but
-            // good enough.)
-            // Note: kept simple — see playPermissionSoundIfNeeded for the
-            // proper de-dupe path. SoundManager itself throttles.
+        // Permission alert sound — only when count increases (0→1, 1→2, etc.)
+        let permCount = agentManager.pendingPermissions.count
+        if permCount > lastKnownPermCount {
             SoundManager.shared.play(.permissionNeeded)
         }
+        lastKnownPermCount = permCount
     }
 
     func stop() {

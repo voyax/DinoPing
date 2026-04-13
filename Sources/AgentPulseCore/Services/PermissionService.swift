@@ -32,8 +32,12 @@ public actor PermissionService {
     public func resolve(requestId: String, decision: PermissionDecision) {
         guard !resolved.contains(requestId) else { return }
         resolved.insert(requestId)
-        // Cap to prevent unbounded growth over long sessions
-        if resolved.count > 200 { resolved.removeAll() }
+        // Cap growth — keep recent half when exceeding limit. Unlike
+        // removeAll(), this preserves recent IDs that might still race.
+        if resolved.count > 200 {
+            let keep = Array(resolved.suffix(100))
+            resolved = Set(keep)
+        }
 
         if let continuation = pending.removeValue(forKey: requestId) {
             continuation.resume(returning: decision)

@@ -338,11 +338,18 @@ struct SessionCard: View {
                         .italic()
                 }
 
-                // When active: show tool call activity feed
+                // When active: show tool call activity feed + counter
                 // When idle/waiting: show Claude's last reply (what it concluded)
                 if session.status == .active, !session.recentTools.isEmpty {
-                    ActivityFeedView(tools: Array(session.recentTools.prefix(3)))
-                        .padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 3) {
+                        ActivityFeedView(tools: Array(session.recentTools.prefix(3)))
+                        if session.recentTools.count > 3 {
+                            Text("\(session.recentTools.count) tool calls so far")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.35))
+                        }
+                    }
+                    .padding(.top, 2)
                 } else if let reply = session.lastAssistantMessage, !reply.isEmpty {
                     Text(reply)
                         .font(.system(size: 10))
@@ -424,14 +431,14 @@ struct ActivityRow: View {
     let tool: ToolCall
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 5) {
             Image(systemName: iconName)
-                .font(.system(size: 8))
-                .foregroundStyle(.white.opacity(0.35))
-                .frame(width: 10)
-            Text(tool.displayDescription)
                 .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(0.4))
+                .foregroundStyle(tool.status == .running ? .green.opacity(0.8) : .white.opacity(0.5))
+                .frame(width: 12)
+            Text(tool.displayDescription)
+                .font(.system(size: 10))
+                .foregroundStyle(tool.status == .running ? .white.opacity(0.8) : .white.opacity(0.55))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
