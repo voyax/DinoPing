@@ -350,7 +350,12 @@ struct SessionCard: View {
                         }
                     }
                     .padding(.top, 2)
-                } else if let reply = session.lastAssistantMessage, !reply.isEmpty {
+                } else if session.status != .active,
+                          let reply = session.lastAssistantMessage, !reply.isEmpty {
+                    // Only show assistant reply when NOT active — prevents the
+                    // previous turn's reply from flashing while Claude is thinking
+                    // (the transcript poll restores the old message before the
+                    // new one is written).
                     Text(reply)
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.45))
