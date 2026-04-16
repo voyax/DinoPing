@@ -58,10 +58,14 @@ public final class AgentManager {
         let payload = event.payload
         let sessionId = payload.sessionId
 
-        // Auto-cleanup stale permissions on resolution events
+        // Auto-cleanup stale permissions on resolution events.
+        // Match by toolUseId when available so parallel tools in the same
+        // session don't wipe each other's pending permissions. `Stop` and
+        // `SessionEnd` carry no toolUseId — those clean the whole session.
         if AgentSession.isResolutionEvent(agentEvent) {
+            let toolUseId = payload.toolUseId
             await MainActor.run {
-                self.cleanupResolvedPermissions(sessionId: sessionId)
+                self.cleanupResolvedPermissions(sessionId: sessionId, toolUseId: toolUseId)
             }
         }
 
@@ -118,11 +122,27 @@ public final class AgentManager {
 
     // MARK: - Private
 
-    private func cleanupResolvedPermissions(sessionId: String) {
-        let staleIds = pendingPermissions.filter { $0.sessionId == sessionId }.map(\.id)
+    /// Clean up pending permissions that have been resolved outside the notch
+    /// (e.g. user approved in the terminal, or the tool finished, or the
+    /// session ended). When `toolUseId` is non-nil we only match the specific
+    /// request whose `toolUseId` matches — so concurrent tools in the same
+    /// session don't wipe each other. Match is on `request.toolUseId`, not
+    /// `request.id`, since `id` is a fresh UUID per request now.
+    private func cleanupResolvedPermissions(sessionId: String, toolUseId: String?) {
+        let staleIds: [String]
+        if let toolUseId, !toolUseId.isEmpty {
+            staleIds = pendingPermissions
+                .filter { $0.sessionId == sessionId && $0.toolUseId == toolUseId }
+                .map(\.id)
+        } else {
+            // No toolUseId (Stop / SessionEnd) → clear everything for the session.
+            staleIds = pendingPermissions.filter { $0.sessionId == sessionId }.map(\.id)
+        }
         guard !staleIds.isEmpty else { return }
-        pendingPermissions.removeAll { $0.sessionId == sessionId }
-        sessions[sessionId]?.apply(.permissionResolved)
+        pendingPermissions.removeAll { staleIds.contains($0.id) }
+        for session in sessions.values where staleIds.contains(session.pendingPermission?.id ?? "") {
+            session.apply(.permissionResolved)
+        }
         for id in staleIds {
             Task { await permissionService.resolve(requestId: id, decision: .deny(reason: "Resolved in terminal")) }
         }
@@ -176,7 +196,30 @@ public final class AgentManager {
             }
             return true
         }.map(\.key)
-        for id in staleIds { sessions.removeValue(forKey: id) }
+        for id in staleIds {
+            denyPendingPermissions(forSessionId: id, reason: "Session ended")
+            sessions.removeValue(forKey: id)
+        }
+    }
+
+    /// Resolve any pending permissions belonging to a session that's about
+    /// to be removed. Without this, an orphan card can outlive its session
+    /// in the UI and the bridge continuation leaks until 24h backstop fires.
+    ///
+    /// Mirrors the (manager array + per-session field + actor resume) trio
+    /// of `approvePermission`/`denyPermission` so the helper is safe to
+    /// reuse from any caller — not just the cleanup paths that happen to
+    /// remove the session in the same cycle.
+    private func denyPendingPermissions(forSessionId sessionId: String, reason: String) {
+        let orphanIds = pendingPermissions.filter { $0.sessionId == sessionId }.map(\.id)
+        guard !orphanIds.isEmpty else { return }
+        pendingPermissions.removeAll { $0.sessionId == sessionId }
+        for s in sessions.values where orphanIds.contains(s.pendingPermission?.id ?? "") {
+            s.apply(.permissionResolved)
+        }
+        for id in orphanIds {
+            Task { await permissionService.resolve(requestId: id, decision: .deny(reason: reason)) }
+        }
     }
 
     /// Install a file watcher that triggers refreshAllPrompts on transcript
@@ -286,6 +329,9 @@ public final class AgentManager {
             }
             return false
         }.map(\.key)
-        for id in removeIds { sessions.removeValue(forKey: id) }
+        for id in removeIds {
+            denyPendingPermissions(forSessionId: id, reason: "Session ended")
+            sessions.removeValue(forKey: id)
+        }
     }
 }

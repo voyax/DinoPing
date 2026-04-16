@@ -161,66 +161,46 @@ struct NotchContentView: View {
             // by the silhouette's max height.
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 6) {
-                    // Permissions first (highest priority)
-                    if !permissions.isEmpty {
-                        // Bulk actions when 2+ permissions queued
-                        if permissions.count >= 2 {
-                            HStack(spacing: 8) {
-                                Button {
-                                    for req in permissions { agentManager.approvePermission(id: req.id) }
-                                } label: {
-                                    Label("Allow All (\(permissions.count))", systemImage: "checkmark.circle")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(.white.opacity(0.1))
-                                        .foregroundStyle(.green)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    for req in permissions { agentManager.denyPermission(id: req.id) }
-                                } label: {
-                                    Label("Deny All", systemImage: "xmark.circle")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(.white.opacity(0.08))
-                                        .foregroundStyle(.red.opacity(0.8))
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                                .buttonStyle(.plain)
+                    // Bulk actions at the top when 2+ permissions are queued
+                    // across multiple sessions. The per-session banner is
+                    // rendered inside each SessionCard so each request lives
+                    // visually attached to the project that triggered it.
+                    if permissions.count >= 2 {
+                        HStack(spacing: 8) {
+                            Button {
+                                for req in permissions { agentManager.approvePermission(id: req.id) }
+                            } label: {
+                                Label("Allow All (\(permissions.count))", systemImage: "checkmark.circle")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(.white.opacity(0.1))
+                                    .foregroundStyle(.green)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
-                        }
+                            .buttonStyle(.plain)
 
-                        ForEach(Array(permissions.enumerated()), id: \.element.id) { i, req in
-                            PermissionBanner(
-                                request: req, queuePosition: i + 1, queueTotal: permissions.count,
-                                onAllow: { agentManager.approvePermission(id: req.id) },
-                                onAlwaysAllow: {
-                                    // Save rule with the specific command/path,
-                                    // not a blanket nil pattern that matches everything.
-                                    let input = req.toolInput.mapValues { $0.value }
-                                    let pattern = AllowRules.primaryArg(
-                                        toolName: req.toolName, input: input
-                                    )
-                                    AllowRules.add(.init(
-                                        toolName: req.toolName,
-                                        pattern: pattern
-                                    ))
-                                    agentManager.approvePermission(id: req.id)
-                                },
-                                onBypass: { agentManager.bypassPermission(id: req.id) },
-                                onDeny: { agentManager.denyPermission(id: req.id) }
-                            )
+                            Button {
+                                for req in permissions { agentManager.denyPermission(id: req.id) }
+                            } label: {
+                                Label("Deny All", systemImage: "xmark.circle")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(.white.opacity(0.08))
+                                    .foregroundStyle(.red.opacity(0.8))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
 
-                    // Session cards (no dividers — each card has its own
-                    // surface so the spacing between them does the separation)
+                    // Session cards. Each card renders its own pending
+                    // permission banner inline so the user sees the request
+                    // attached to the project it came from (sortedSessions
+                    // already puts `waitingForPermission` at the top).
                     ForEach(sessions, id: \.id) { session in
-                        SessionCard(session: session)
+                        SessionCard(session: session, agentManager: agentManager)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -272,7 +252,10 @@ struct NotchContentView: View {
     }
 
     private func compactText(sessions: [AgentSession], permCount: Int) -> String {
-        if permCount > 0 { return "\(permCount) needs input" }
+        // "needs approval" disambiguates from `.waitingForInput` status
+        // (which means "Claude is waiting on the user to type a prompt").
+        // Permission requests need an Allow/Deny click — different action.
+        if permCount > 0 { return permCount == 1 ? "1 needs approval" : "\(permCount) need approval" }
         if sessions.isEmpty { return "No agents" }
         let total = sessions.count
         let active = sessions.filter { $0.status == .active }.count
@@ -286,10 +269,67 @@ struct NotchContentView: View {
 
 struct SessionCard: View {
     let session: AgentSession
+    let agentManager: AgentManager
     @State private var hovering = false
     @State private var jumpHovering = false
 
+    /// True when an inline action banner (permission or question) is showing.
+    /// Used to suppress redundant secondary content (activity feed, agent
+    /// kind capsule, hover-jump button) so the banner gets visual focus.
+    private var hasInlineBanner: Bool {
+        session.pendingPermission != nil || session.pendingQuestion != nil
+    }
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sessionBody
+
+            // Inline interaction card — permission has priority over a
+            // question (a session never legitimately has both, but if a race
+            // ever produces both we'd rather unblock the bridge first).
+            // Keeping the request visually tied to the project that triggered
+            // it is the whole point of inlining instead of floating at the
+            // top of the panel.
+            if let req = session.pendingPermission {
+                PermissionBanner(
+                    request: req,
+                    queuePosition: 1, queueTotal: 1,   // single-per-session, hide numbering
+                    onAllow: { agentManager.approvePermission(id: req.id) },
+                    onAlwaysAllow: {
+                        let input = req.toolInput.mapValues { $0.value }
+                        let pattern = AllowRules.primaryArg(toolName: req.toolName, input: input)
+                        AllowRules.add(.init(toolName: req.toolName, pattern: pattern))
+                        agentManager.approvePermission(id: req.id)
+                    },
+                    onBypass: { agentManager.bypassPermission(id: req.id) },
+                    onDeny: { agentManager.denyPermission(id: req.id) }
+                )
+            } else if let question = session.pendingQuestion {
+                QuestionBanner(
+                    question: question,
+                    agentDisplayName: session.agentKind.displayName,
+                    onJump: { TerminalJumper.jump(to: session) }
+                )
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.white.opacity(hovering ? 0.09 : 0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(.white.opacity(0.08), lineWidth: 0.5)
+                )
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    @ViewBuilder
+    private var sessionBody: some View {
         HStack(alignment: .top, spacing: 10) {
             // Small agent icon — just enough to hint at agent type without
             // dominating the card. 20pt feels proportional to 13pt title.
@@ -338,82 +378,79 @@ struct SessionCard: View {
                         .italic()
                 }
 
-                // When active: show tool call activity feed + counter
-                // When idle/waiting: show Claude's last reply (what it concluded)
-                if session.status == .active, !session.recentTools.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        ActivityFeedView(tools: Array(session.recentTools.prefix(3)))
-                        if session.recentTools.count > 3 {
-                            Text("\(session.recentTools.count) tool calls so far")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white.opacity(0.35))
+                // Suppress secondary card content when a banner is active —
+                // the banner already communicates "what Claude needs from
+                // you" louder than the activity feed / agent kind row would.
+                // Showing them all at once just makes the card noisy and
+                // pushes the actionable banner further down the screen.
+                if !hasInlineBanner {
+                    // When active: show tool call activity feed + counter
+                    // When idle/waiting: show Claude's last reply (what it concluded)
+                    if session.status == .active, !session.recentTools.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ActivityFeedView(tools: Array(session.recentTools.prefix(3)))
+                            if session.recentTools.count > 3 {
+                                Text("\(session.recentTools.count) tool calls so far")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.white.opacity(0.35))
+                            }
                         }
+                        .padding(.top, 2)
+                    } else if session.status != .active,
+                              let reply = session.lastAssistantMessage, !reply.isEmpty {
+                        // Only show assistant reply when NOT active — prevents the
+                        // previous turn's reply from flashing while Claude is thinking
+                        // (the transcript poll restores the old message before the
+                        // new one is written).
+                        Text(reply)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.45))
+                            .lineLimit(2)
+                            .truncationMode(.tail)
                     }
-                    .padding(.top, 2)
-                } else if session.status != .active,
-                          let reply = session.lastAssistantMessage, !reply.isEmpty {
-                    // Only show assistant reply when NOT active — prevents the
-                    // previous turn's reply from flashing while Claude is thinking
-                    // (the transcript poll restores the old message before the
-                    // new one is written).
-                    Text(reply)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .lineLimit(2)
-                        .truncationMode(.tail)
+
+                    // Row 3: agent kind + status as a single subtle line
+                    HStack(spacing: 6) {
+                        Text(session.agentKind.displayName)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(session.agentKind.tintColor.opacity(0.95))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(session.agentKind.tintColor.opacity(0.16))
+                            .clipShape(Capsule())
+
+                        Text("·")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.3))
+
+                        Text(statusText)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .lineLimit(1)
+                    }
+                    .padding(.top, 1)
                 }
-
-                // Row 3: agent kind + status as a single subtle line
-                HStack(spacing: 6) {
-                    Text(session.agentKind.displayName)
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(session.agentKind.tintColor.opacity(0.95))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(session.agentKind.tintColor.opacity(0.16))
-                        .clipShape(Capsule())
-
-                    Text("·")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.3))
-
-                    Text(statusText)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                }
-                .padding(.top, 1)
             }
 
-            // Terminal jump button — only visible on hover.
-            Button(action: { TerminalJumper.jump(to: session) }) {
-                Image(systemName: "arrow.up.right.square")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(jumpHovering ? 0.95 : 0.55))
-                    .padding(6)
-                    .background(
-                        Circle().fill(.white.opacity(jumpHovering ? 0.12 : 0.0))
-                    )
+            // Terminal jump button — only visible on hover, and only when
+            // there's no inline banner (the banner already provides its own
+            // jump CTA, so showing both would be visual noise).
+            if !hasInlineBanner {
+                Button(action: { TerminalJumper.jump(to: session) }) {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(jumpHovering ? 0.95 : 0.55))
+                        .padding(6)
+                        .background(
+                            Circle().fill(.white.opacity(jumpHovering ? 0.12 : 0.0))
+                        )
+                }
+                .buttonStyle(.plain)
+                .opacity(hovering ? 1 : 0)
+                .onHover { jumpHovering = $0 }
+                .help("Bring the terminal running this agent to the front")
             }
-            .buttonStyle(.plain)
-            .opacity(hovering ? 1 : 0)
-            .onHover { jumpHovering = $0 }
-            .help("Bring the terminal running this agent to the front")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.white.opacity(hovering ? 0.09 : 0.05))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(.white.opacity(0.08), lineWidth: 0.5)
-                )
-        )
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 
 }
@@ -502,17 +539,26 @@ struct ActivityRow: View {
 
 extension SessionCard {
     private var statusColor: Color {
+        // Pending question is shown in the body, but the status dot should
+        // also reflect "Claude is asking you something" — same blue/cyan as
+        // the QuestionBanner so the eye associates them.
+        if session.pendingQuestion != nil {
+            return Color(red: 0.36, green: 0.72, blue: 0.95)
+        }
         switch session.status {
-        case .active: .green
-        case .waitingForPermission: .orange
-        case .waitingForInput: .yellow.opacity(0.8)
-        case .idle: .gray
-        case .done: .blue.opacity(0.7)
-        case .stopped: .red.opacity(0.5)
+        case .active: return .green
+        case .waitingForPermission: return .orange
+        case .waitingForInput: return .yellow.opacity(0.8)
+        case .idle: return .gray
+        case .done: return .blue.opacity(0.7)
+        case .stopped: return .red.opacity(0.5)
         }
     }
 
     private var statusText: String {
+        if session.pendingQuestion != nil {
+            return "Asking you a question"
+        }
         switch session.status {
         case .active:
             // Show current tool call if running, otherwise generic "Working..."

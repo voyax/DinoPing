@@ -14,6 +14,14 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
     public var status: SessionStatus
     public var currentToolCall: ToolCall?
     public var pendingPermission: PermissionRequest?
+    /// Set when Claude calls `AskUserQuestion`. Cleared when the matching
+    /// `PostToolUse` arrives (matched by `pendingQuestionToolUseId`), the
+    /// session resets, or a new user prompt arrives.
+    public var pendingQuestion: AskUserQuestion?
+    /// `tool_use_id` of the live `AskUserQuestion` call. Used to clear the
+    /// banner when the *correct* tool completes — matching by `currentToolCall`
+    /// is unreliable because parallel tools overwrite it before answer arrives.
+    public var pendingQuestionToolUseId: String?
     public var startTime: Date
     public var lastEventTime: Date
     public var subagentIds: [String]
@@ -65,12 +73,23 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
 
         case .sessionEnded:
             status = .done
+            // A dead session must not keep showing a question banner —
+            // the terminal hosting the answer is gone.
+            pendingQuestion = nil
+            pendingQuestionToolUseId = nil
 
         case .toolStarted(let tool):
             currentToolCall = tool
             status = .active
 
-        case .toolSucceeded:
+        case .toolSucceeded(let toolUseId):
+            // Match by toolUseId — `currentToolCall` may already point at a
+            // sibling tool that fired after AskUserQuestion but completed
+            // first, so name-matching it is unreliable.
+            if let toolUseId, pendingQuestionToolUseId == toolUseId {
+                pendingQuestion = nil
+                pendingQuestionToolUseId = nil
+            }
             currentToolCall?.status = .succeeded
             currentToolCall?.endTime = .now
             // Archive to recent history
@@ -82,7 +101,11 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
             }
             status = .active
 
-        case .toolFailed(let reason):
+        case .toolFailed(let reason, let toolUseId):
+            if let toolUseId, pendingQuestionToolUseId == toolUseId {
+                pendingQuestion = nil
+                pendingQuestionToolUseId = nil
+            }
             currentToolCall?.status = .failed(reason)
             currentToolCall?.endTime = .now
             if let completed = currentToolCall {
@@ -108,6 +131,8 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
         case .stopped:
             status = .waitingForInput
             currentToolCall = nil
+            pendingQuestion = nil
+            pendingQuestionToolUseId = nil
 
         case .subagentStarted(let childId):
             subagentIds.append(childId)
@@ -122,15 +147,29 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
             recentTools = []
             currentToolCall = nil
             lastAssistantMessage = nil
+            pendingQuestion = nil
+            pendingQuestionToolUseId = nil
+
+        case .questionAsked(let question, let toolUseId):
+            pendingQuestion = question
+            pendingQuestionToolUseId = toolUseId
+            status = .waitingForInput
         }
     }
 
     /// Does this event mean a pending permission was resolved externally?
+    ///
+    /// `.toolStarted` is deliberately excluded: `PreToolUse` fires *before*
+    /// Claude Code checks permission, so the fact that a tool is starting
+    /// says nothing about whether the user approved — treating it as a
+    /// resolution was a bug that wiped still-waiting permission cards.
     public static func isResolutionEvent(_ event: AgentEvent) -> Bool {
         switch event {
-        case .toolStarted, .toolSucceeded, .toolFailed, .stopped, .sessionEnded:
+        case .toolSucceeded, .toolFailed, .stopped, .sessionEnded:
             return true
-        default:
+        case .sessionStarted, .toolStarted, .permissionRequested,
+             .permissionResolved, .notified, .subagentStarted,
+             .subagentStopped, .userPromptSubmitted, .questionAsked:
             return false
         }
     }

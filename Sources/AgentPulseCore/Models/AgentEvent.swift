@@ -6,8 +6,12 @@ public enum AgentEvent: Sendable {
     case sessionStarted
     case sessionEnded
     case toolStarted(ToolCall)
-    case toolSucceeded
-    case toolFailed(String)
+    /// `toolUseId` lets the reducer correlate completion with state it set
+    /// at PreToolUse time (e.g. clearing a `pendingQuestion` only when the
+    /// matching AskUserQuestion completes — not some sibling tool that
+    /// happened to finish first).
+    case toolSucceeded(toolUseId: String?)
+    case toolFailed(reason: String, toolUseId: String?)
     case permissionRequested(PermissionRequest)
     case permissionResolved
     case notified
@@ -15,6 +19,10 @@ public enum AgentEvent: Sendable {
     case subagentStarted(id: String)
     case subagentStopped
     case userPromptSubmitted
+    /// Claude called `AskUserQuestion`. Surfaced via the bridge approval
+    /// path, not via a hook event, but flows through the same reducer so
+    /// every state mutation has a single entry point.
+    case questionAsked(AskUserQuestion, toolUseId: String?)
 
     /// Convert a HookEvent into an AgentEvent.
     public static func from(_ hook: HookEvent) -> AgentEvent {
@@ -34,12 +42,15 @@ public enum AgentEvent: Sendable {
             )
             return .toolStarted(tool)
         case .postToolUse:
-            return .toolSucceeded
+            return .toolSucceeded(toolUseId: p.toolUseId)
         case .postToolUseFailure:
-            return .toolFailed("Tool call failed")
+            return .toolFailed(reason: "Tool call failed", toolUseId: p.toolUseId)
         case .permissionRequest:
+            // `id` is a fresh UUID, NOT toolUseId — see PermissionRequest doc.
+            // Two requests with the same toolUseId (Claude retry, parallel
+            // dispatch, etc.) get distinct ids so dedup doesn't drop one.
             let req = PermissionRequest(
-                id: p.toolUseId ?? "perm-\(UUID().uuidString.prefix(8))",
+                toolUseId: p.toolUseId,
                 sessionId: p.sessionId,
                 toolName: p.toolName ?? "Unknown",
                 toolInput: p.toolInput ?? [:],

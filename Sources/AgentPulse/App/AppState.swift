@@ -28,6 +28,19 @@ final class AppState {
 
         do {
             try hookInstaller.installClaudeCodeHooks()
+        } catch let error as HookInstaller.InstallError {
+            // Settings.json is corrupt — refuse to overwrite. Surface to user
+            // via NSAlert so they actually know we couldn't install (vs the
+            // app silently launching with no monitoring active).
+            print("[AgentPulse] ❌ \(error.localizedDescription)")
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "AgentPulse couldn't install Claude Code hooks"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
         } catch {
             print("[AgentPulse] ❌ Hook install failed: \(error)")
         }
@@ -49,23 +62,51 @@ final class AppState {
                 let toolName = payload.toolName ?? "Unknown"
                 let toolInput = payload.toolInput?.mapValues { $0.value } ?? [:]
 
+                // AskUserQuestion is an interactive prompt, not a permission
+                // request. Auto-allow so Claude Code can immediately render
+                // the question in the terminal, and surface the question in
+                // the session card (read-only) so the user knows what's
+                // pending without having to switch windows just to read it.
+                if toolName == "AskUserQuestion" {
+                    // Even on parse failure we still surface a placeholder —
+                    // a silent auto-allow leaves the user blind to the fact
+                    // that Claude is blocked on a terminal prompt.
+                    let question = AskUserQuestion.parse(from: toolInput)
+                        ?? AskUserQuestion.placeholder
+                    if AskUserQuestion.parse(from: toolInput) == nil {
+                        print("[AgentPulse] ⚠️ AskUserQuestion parse failed; rendering placeholder")
+                    }
+                    let toolUseId = payload.toolUseId
+                    await MainActor.run {
+                        let session = manager.getOrCreateSession(
+                            id: payload.sessionId, cwd: payload.cwd
+                        )
+                        session.apply(.questionAsked(question, toolUseId: toolUseId))
+                    }
+                    return .allow(hookEvent: "PermissionRequest")
+                }
+
                 // Check "Always Allow" rules first — auto-approve without UI.
                 if AllowRules.isAllowed(toolName: toolName, toolInput: toolInput) {
                     return .allow(hookEvent: "PermissionRequest")
                 }
 
-                let requestId = payload.toolUseId ?? "perm-\(UUID().uuidString.prefix(8))"
+                // Fresh UUID for the request id; toolUseId is recorded
+                // separately on PermissionRequest so cleanup paths can match
+                // PostToolUse to the right card. A retry with the same
+                // toolUseId now creates a *new* request rather than being
+                // silently deduped (and overwriting the prior continuation).
                 let req = PermissionRequest(
-                    id: requestId, sessionId: payload.sessionId,
+                    toolUseId: payload.toolUseId,
+                    sessionId: payload.sessionId,
                     toolName: toolName,
                     toolInput: payload.toolInput ?? [:],
                     cwd: payload.cwd, receivedAt: .now
                 )
+                let requestId = req.id
                 await MainActor.run {
                     manager.getOrCreateSession(id: payload.sessionId, cwd: payload.cwd)
-                    if !manager.pendingPermissions.contains(where: { $0.id == requestId }) {
-                        manager.pendingPermissions.append(req)
-                    }
+                    manager.pendingPermissions.append(req)
                     manager.sessions[payload.sessionId]?.apply(.permissionRequested(req))
                     SoundManager.shared.play(.permissionNeeded)
                 }
@@ -74,6 +115,18 @@ final class AppState {
 
                 await MainActor.run {
                     manager.pendingPermissions.removeAll { $0.id == requestId }
+                    // Also clear the per-session field. SessionCard reads
+                    // `session.pendingPermission` (not the manager array)
+                    // when deciding to render the orange banner. Skipping
+                    // this leaves an orphan card after bridge disconnect:
+                    // user clicks → approvePermission no-ops because the
+                    // array is already empty AND the resolved set blocks
+                    // the resolve. This was the same bug we already fixed
+                    // for `pendingPermissions`, just one layer deeper.
+                    if let session = manager.sessions[payload.sessionId],
+                       session.pendingPermission?.id == requestId {
+                        session.apply(.permissionResolved)
+                    }
                 }
 
                 switch decision {
@@ -242,15 +295,15 @@ final class AppState {
             return "{\"cursor_x\":\(Int(mouse.x)),\"cursor_y\":\(Int(mouse.y)),\"cursor_screen\":\"\(cursorScreenName)\",\"panel_screen\":\"\(panelScreenName)\",\"state\":\"\(state)\",\"inside\":\(inside)}"
 
         case "test:permission":
-            let id = "debug-perm-\(Int.random(in: 1000...9999))"
             let req = PermissionRequest(
-                id: id,
+                toolUseId: "debug-toolu-\(Int.random(in: 1000...9999))",
                 sessionId: "debug-session",
                 toolName: "Bash",
                 toolInput: ["command": AnyCodable("echo 'hello from debug'")],
                 cwd: "/tmp/debug",
                 receivedAt: .now
             )
+            let id = req.id
             manager.getOrCreateSession(id: "debug-session", cwd: "/tmp/debug")
             if !manager.pendingPermissions.contains(where: { $0.id == id }) {
                 manager.pendingPermissions.append(req)

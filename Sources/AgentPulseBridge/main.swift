@@ -28,7 +28,13 @@ request.httpMethod = "POST"
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 request.setValue(agentFlag, forHTTPHeaderField: "X-Agent-Type")
 request.httpBody = inputData
-request.timeoutInterval = 120 // 2 minutes max wait for user decision
+// 86400s = 24h. Matches the PermissionRequest hook timeout in HookInstaller.
+// Claude Code has no async-push for hook decisions, so the bridge has to stay
+// alive until the user actually clicks Allow/Deny in the notch (or the OS
+// reaps us). Anything shorter would force the user to redo decisions if they
+// step away from the keyboard — the whole point of having a notch UI is to
+// fit the user's pace, not the network's.
+request.timeoutInterval = 86400
 
 let semaphore = DispatchSemaphore(value: 0)
 var responseData: Data?

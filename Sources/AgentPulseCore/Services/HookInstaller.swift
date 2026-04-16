@@ -11,6 +11,25 @@ public struct HookInstaller {
     /// AgentPulse identifier used to detect our hooks (for cleanup/update).
     private static let hookMarker = "agentpulse"
 
+    public enum InstallError: Error, LocalizedError {
+        /// `~/.claude/settings.json` exists but isn't valid JSON. We refuse
+        /// to overwrite it because doing so would silently destroy the
+        /// user's MCP servers, env vars, custom hooks, etc. Backup is
+        /// preserved at `<path>.bak` from the previous successful write.
+        case settingsCorrupt(path: String, underlying: Error)
+
+        public var errorDescription: String? {
+            switch self {
+            case .settingsCorrupt(let path, let underlying):
+                return """
+                AgentPulse refused to install hooks: \(path) exists but isn't valid JSON.
+                Fix or remove the file (or restore from \(path).bak) and relaunch.
+                Underlying: \(underlying.localizedDescription)
+                """
+            }
+        }
+    }
+
     public init(port: Int = Constants.defaultPort) {
         self.port = port
         // Bridge binary installed alongside the app
@@ -27,7 +46,22 @@ public struct HookInstaller {
         let settingsPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/settings.json")
 
-        var settings = readJSONFile(settingsPath) ?? [:]
+        // CRITICAL: distinguish "file doesn't exist yet" (start fresh) from
+        // "file exists but is corrupt/unparseable" (BAIL — don't overwrite).
+        // Earlier behavior used `?? [:]` for both, silently nuking the
+        // user's MCP servers / env vars / custom hooks if their file ever
+        // had a stray comma. The .bak rotation can save them but only if
+        // they know to look. Surface the error loudly instead.
+        var settings: [String: Any]
+        if FileManager.default.fileExists(atPath: settingsPath.path) {
+            do {
+                settings = try readJSONFileStrict(settingsPath)
+            } catch {
+                throw InstallError.settingsCorrupt(path: settingsPath.path, underlying: error)
+            }
+        } else {
+            settings = [:]
+        }
         var hooks = (settings["hooks"] as? [String: Any]) ?? [:]
 
         let baseURL = "http://127.0.0.1:\(port)/hooks"
@@ -58,10 +92,19 @@ public struct HookInstaller {
         // Command hook for PermissionRequest (blocking — bridge waits for notch approval).
         // Matcher MUST be "*" (not "") — empty string doesn't match any tools
         // for PermissionRequest hooks, so the hook would never fire.
+        //
+        // 86400s = 24h. Claude Code has no async-push for hook decisions, so
+        // the bridge MUST stay alive until the user clicks. 24h matches the
+        // de-facto industry standard (claude-island and open-vibe-island both
+        // use 86400) — covers any reasonable AFK window so users don't have
+        // to redo decisions after lunch. The bridge is a thin URLSession
+        // wait (~10MB), and PermissionService's cancellation handler cleans
+        // up the moment the bridge actually dies (Claude session quit, OS
+        // kill, etc.).
         let bridgeHookEntry: [String: Any] = [
             "type": "command",
             "command": "\(bridgePath) --agent claude",
-            "timeout": 120,
+            "timeout": 86400,
         ]
         mergeHookGroup(into: &hooks, event: "PermissionRequest", hookEntry: bridgeHookEntry, matcher: "*")
 
@@ -174,6 +217,22 @@ public struct HookInstaller {
             return nil
         }
         return json
+    }
+
+    /// Strict variant that throws on parse failure instead of returning nil.
+    /// Use this when "file is corrupt" must be distinguished from "file is
+    /// missing" — the install path uses it to refuse to overwrite a broken
+    /// config and destroy user data.
+    private func readJSONFileStrict(_ url: URL) throws -> [String: Any] {
+        let data = try Data(contentsOf: url)
+        let json = try JSONSerialization.jsonObject(with: data)
+        guard let dict = json as? [String: Any] else {
+            throw NSError(
+                domain: "AgentPulse.HookInstaller", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Top-level JSON is not an object"]
+            )
+        }
+        return dict
     }
 
     private func writeJSONFile(_ json: [String: Any], to url: URL) throws {

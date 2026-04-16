@@ -82,33 +82,56 @@ public actor HookHTTPServer {
         // Bridge approval endpoint: blocks until user decides in notch UI.
         // Bridge CLI POSTs here and waits. When user clicks Allow/Deny,
         // the response is sent back and bridge forwards it to Claude Code.
+        //
+        // CRITICAL: wrapped in `consumeWithCancellationOnInboundClose` so
+        // when the bridge process dies (Claude killed it, OS reaped it),
+        // Hummingbird actually cancels the Task running this handler.
+        // PermissionService.awaitDecision uses withTaskCancellationHandler
+        // to react and clear the now-stale notch card. Without this wrapper,
+        // a dead bridge would leave the card "live" until app quit — the
+        // user would click and nothing would happen, because the response
+        // can't be written to a closed connection.
         router.post("api/approve") { request, context -> Response in
-            let body = try await request.body.collect(upTo: 1_048_576)
-            _ = String(data: Data(buffer: body), encoding: .utf8) ?? ""
             let agentType = request.headers[.init("X-Agent-Type")!] ?? "claude"
-            print("[AgentPulse] 🔔 Bridge approval request from \(agentType)")
-
-            let payload: HookPayload
             do {
-                payload = try JSONDecoder().decode(HookPayload.self, from: body)
-            } catch {
-                print("[AgentPulse] ❌ Bridge JSON decode failed: \(error)")
-                return Response(status: .ok) // Fail-open
+                return try await request.body.consumeWithCancellationOnInboundClose { body in
+                    let bodyBuffer = try await body.collect(upTo: 1_048_576)
+                    print("[AgentPulse] 🔔 Bridge approval request from \(agentType)")
+
+                    let payload: HookPayload
+                    do {
+                        payload = try JSONDecoder().decode(HookPayload.self, from: bodyBuffer)
+                    } catch {
+                        print("[AgentPulse] ❌ Bridge JSON decode failed: \(error)")
+                        return Response(status: .ok) // Fail-open
+                    }
+
+                    guard let approvalHandler = await handler.approvalHandler else {
+                        return Response(status: .ok) // No handler → fail-open
+                    }
+
+                    // BLOCKS until user clicks, bridge disconnects (cancellation),
+                    // or 24h backstop. Cancellation propagates through the
+                    // approval handler via PermissionService's task-cancellation
+                    // handler, which resolves the continuation with .deny.
+                    let hookResponse = await approvalHandler(payload, agentType)
+
+                    let data = try JSONEncoder().encode(hookResponse)
+                    return Response(
+                        status: .ok,
+                        headers: [.contentType: "application/json"],
+                        body: .init(byteBuffer: .init(data: data))
+                    )
+                }
+            } catch is CancellationError {
+                // Bridge disconnected mid-wait. The cancellation already
+                // bubbled into PermissionService and resolved the continuation,
+                // so the UI is being cleaned up on its own. We still need to
+                // return *something* to satisfy the route signature; nobody is
+                // reading this anyway because the connection is gone.
+                print("[AgentPulse] 🔌 Bridge disconnected before decision — UI cleared")
+                return Response(status: .ok)
             }
-
-            guard let approvalHandler = await handler.approvalHandler else {
-                return Response(status: .ok) // No handler → fail-open
-            }
-
-            // This BLOCKS until user clicks Allow/Deny in notch or timeout
-            let hookResponse = await approvalHandler(payload, agentType)
-
-            let data = try JSONEncoder().encode(hookResponse)
-            return Response(
-                status: .ok,
-                headers: [.contentType: "application/json"],
-                body: .init(byteBuffer: .init(data: data))
-            )
         }
 
         // Health check
@@ -250,16 +273,22 @@ public actor HookHTTPServer {
     ) async throws -> Response {
         let body = try await request.body.collect(upTo: 1_048_576) // 1MB max
 
-        let rawBody = String(data: Data(buffer: body), encoding: .utf8) ?? "<binary>"
-        print("[AgentPulse] 📥 \(eventType) received, body=\(rawBody.prefix(200))")
+        // PRIVACY: do NOT print the raw body. Hook payloads contain Bash
+        // commands (potentially with inline credentials), Edit diffs (file
+        // contents), and tool inputs. They go to unified logging via stdout
+        // and persist far longer than necessary. Body inspection lives
+        // behind DEBUG only, and even there we mask via Logger.
+        Logger.hookServer.debug("\(String(describing: eventType)) received (\(body.readableBytes) bytes)")
 
         let decoder = JSONDecoder()
         let payload: HookPayload
         do {
             payload = try decoder.decode(HookPayload.self, from: body)
         } catch {
-            print("[AgentPulse] ❌ JSON decode FAILED for \(eventType): \(error)")
-            print("[AgentPulse] ❌ Raw body: \(rawBody.prefix(500))")
+            // Don't echo the raw body even on decode failure — same privacy
+            // concern. Surface just the decoder error so we can debug schema
+            // drift without exfiltrating tool inputs.
+            Logger.hookServer.error("JSON decode failed for \(String(describing: eventType)): \(error.localizedDescription, privacy: .public)")
             return Response(status: .ok)
         }
 

@@ -1,16 +1,31 @@
 import Foundation
 
 public struct PermissionRequest: Identifiable, Sendable {
+    /// Unique per-request UUID. Independent from `toolUseId` so that Claude
+    /// retrying the same tool call (same toolUseId) produces a *new* request
+    /// instead of being silently swallowed by dedup logic that compares
+    /// `pendingPermissions` entries by `id`.
     public let id: String
+    /// Claude Code's `tool_use_id` from the hook payload. Used by cleanup
+    /// logic to match a `PostToolUse`/`PostToolUseFailure` to the request
+    /// that it resolves. Optional because some agent / payload variants may
+    /// omit it; cleanup degrades gracefully when nil.
+    public let toolUseId: String?
     public let sessionId: String
     public let toolName: String
     public let toolInput: [String: AnyCodable]
     public let cwd: String
     public let receivedAt: Date
 
-    public init(id: String, sessionId: String, toolName: String,
-                toolInput: [String: AnyCodable], cwd: String, receivedAt: Date) {
-        self.id = id; self.sessionId = sessionId; self.toolName = toolName
+    public init(
+        id: String = UUID().uuidString,
+        toolUseId: String?,
+        sessionId: String, toolName: String,
+        toolInput: [String: AnyCodable], cwd: String, receivedAt: Date
+    ) {
+        self.id = id
+        self.toolUseId = toolUseId
+        self.sessionId = sessionId; self.toolName = toolName
         self.toolInput = toolInput; self.cwd = cwd; self.receivedAt = receivedAt
     }
 
