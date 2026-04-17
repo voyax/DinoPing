@@ -278,7 +278,10 @@ public actor HookHTTPServer {
         // contents), and tool inputs. They go to unified logging via stdout
         // and persist far longer than necessary. Body inspection lives
         // behind DEBUG only, and even there we mask via Logger.
-        Logger.hookServer.debug("\(String(describing: eventType)) received (\(body.readableBytes) bytes)")
+        // .info (not .debug) so it actually appears in Console.app / unified
+        // logging at default filter level. .debug is silently filtered in
+        // release builds, which left zero observability on hook arrivals.
+        Logger.hookServer.info("\(String(describing: eventType), privacy: .public) received (\(body.readableBytes, privacy: .public) bytes)")
 
         let decoder = JSONDecoder()
         let payload: HookPayload
@@ -288,7 +291,7 @@ public actor HookHTTPServer {
             // Don't echo the raw body even on decode failure — same privacy
             // concern. Surface just the decoder error so we can debug schema
             // drift without exfiltrating tool inputs.
-            Logger.hookServer.error("JSON decode failed for \(String(describing: eventType)): \(error.localizedDescription, privacy: .public)")
+            Logger.hookServer.error("JSON decode failed for \(String(describing: eventType), privacy: .public): \(error.localizedDescription, privacy: .public)")
             return Response(status: .ok)
         }
 

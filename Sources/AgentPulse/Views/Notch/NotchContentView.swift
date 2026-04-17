@@ -247,15 +247,28 @@ struct NotchContentView: View {
 
     private func compactStatusColor(sessions: [AgentSession], permCount: Int) -> Color {
         if permCount > 0 { return .orange }
+        if sessions.contains(where: { $0.pendingQuestion != nil }) {
+            return QuestionBanner.accent
+        }
         if sessions.contains(where: { $0.status == .active }) { return .green }
         return .white.opacity(0.4)
     }
 
     private func compactText(sessions: [AgentSession], permCount: Int) -> String {
-        // "needs approval" disambiguates from `.waitingForInput` status
-        // (which means "Claude is waiting on the user to type a prompt").
-        // Permission requests need an Allow/Deny click — different action.
-        if permCount > 0 { return permCount == 1 ? "1 needs approval" : "\(permCount) need approval" }
+        let questionCount = sessions.filter { $0.pendingQuestion != nil }.count
+
+        // Permissions are the most urgent — surface first.
+        if permCount > 0 && questionCount > 0 {
+            return "\(permCount) approval, \(questionCount) question"
+        }
+        if permCount > 0 {
+            return permCount == 1 ? "1 needs approval" : "\(permCount) need approval"
+        }
+        // Questions = "Claude is waiting on your answer in terminal"
+        if questionCount > 0 {
+            return questionCount == 1 ? "1 question" : "\(questionCount) questions"
+        }
+
         if sessions.isEmpty { return "No agents" }
         let total = sessions.count
         let active = sessions.filter { $0.status == .active }.count

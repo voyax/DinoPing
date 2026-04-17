@@ -105,28 +105,9 @@ struct PermissionBanner: View {
                 newString: new
             )
         } else if request.toolName == "Bash", let cmd = request.bashCommand {
-            // CRITICAL: render command verbatim. Earlier we ran `cleanCommand`
-            // which stripped comments and joined multi-line input with " && ",
-            // producing a *different* command than what would actually execute.
-            // For an approval gate that's a correctness bug — the user might
-            // approve a sanitized one-liner while a heredoc / multi-stage
-            // script runs in reality. Whatever Claude is going to run is what
-            // the user gets to see, byte for byte.
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 0) {
-                    Text("$ ")
-                        .foregroundStyle(.green.opacity(0.6))
-                    Text(cmd)
-                        .foregroundStyle(.white.opacity(0.85))
-                        .lineLimit(8)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .font(.system(size: 10.5, design: .monospaced))
-            }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            // CRITICAL: render command verbatim — whatever Claude is going to
+            // run is what the user gets to see, byte for byte.
+            bashCommandView(cmd)
         } else if request.toolName == "Write" {
             VStack(alignment: .leading, spacing: 4) {
                 Text(request.fileName ?? "?")
@@ -154,6 +135,40 @@ struct PermissionBanner: View {
                 .background(Color.white.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
+    }
+
+    private static let maxVisibleLines = 8
+
+    @ViewBuilder
+    private func bashCommandView(_ cmd: String) -> some View {
+        let lines = cmd.components(separatedBy: "\n")
+        let truncated = lines.count > Self.maxVisibleLines
+        let visibleCmd = truncated
+            ? lines.prefix(Self.maxVisibleLines).joined(separator: "\n")
+            : cmd
+
+        VStack(alignment: .leading, spacing: 4) {
+            ScrollView([.horizontal], showsIndicators: true) {
+                HStack(alignment: .top, spacing: 0) {
+                    Text("$ ")
+                        .foregroundStyle(.green.opacity(0.6))
+                    Text(visibleCmd)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .fixedSize(horizontal: true, vertical: true)
+                }
+                .font(.system(size: 10.5, design: .monospaced))
+            }
+
+            if truncated {
+                Text("… +\(lines.count - Self.maxVisibleLines) more lines")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     /// Compact age text. "now" / "5m" / "2h" / "1d". Updates from a
@@ -204,7 +219,11 @@ struct PermissionButton: View {
             case .deny: .white.opacity(0.08)
             case .allow: .white.opacity(0.1)
             case .alwaysAllow: .blue.opacity(0.25)
-            case .bypass: .red.opacity(0.25)
+            // Ghost: no fill, just text. Bypass permanently disables future
+            // prompts for this tool type — it should look LESS prominent than
+            // the safe Deny/Allow pair, not MORE. The old red fill was more
+            // eye-catching than Deny's gray, inverting the risk hierarchy.
+            case .bypass: .clear
             }
         }
 
@@ -213,7 +232,7 @@ struct PermissionButton: View {
             case .deny: .white.opacity(0.8)
             case .allow: .white.opacity(0.9)
             case .alwaysAllow: .blue
-            case .bypass: .red
+            case .bypass: .red.opacity(0.6)
             }
         }
     }
