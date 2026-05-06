@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+.swiftpm/
+test_permission.txt
