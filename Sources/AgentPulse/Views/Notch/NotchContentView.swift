@@ -135,10 +135,22 @@ struct NotchContentView: View {
 
     // MARK: - Expanded (cards)
 
+    @State private var allowAllResetTask: Task<Void, Never>?
+    @State private var denyAllResetTask: Task<Void, Never>?
+    @State private var toastMessage: String?
+    @State private var toastGeneration: Int = 0
+
     @ViewBuilder
     private var expandedView: some View {
         let sessions = sortedSessions
-        let permissions = agentManager.pendingPermissions
+        // Only count permissions that actually have a visible banner in a
+        // session card. The pendingPermissions array can have stale entries
+        // (e.g., terminal approval cleared session.pendingPermission but the
+        // array entry wasn't removed in the same cycle). Using the array
+        // directly would show "Allow All (2)" with zero visible banners.
+        let permissions = agentManager.pendingPermissions.filter { req in
+            agentManager.sessions[req.sessionId]?.pendingPermission?.id == req.id
+        }
 
         // Reserve room for the notch silhouette at the top so the first card
         // doesn't get cropped by the curve.
@@ -168,28 +180,48 @@ struct NotchContentView: View {
                     if permissions.count >= 2 {
                         HStack(spacing: 8) {
                             Button {
-                                for req in permissions { agentManager.approvePermission(id: req.id) }
+                                if agentManager.allowAllConfirm {
+                                    for req in permissions { agentManager.approvePermission(id: req.id) }
+                                    agentManager.allowAllConfirm = false
+                                } else {
+                                    withAnimation(.easeInOut(duration: 0.15)) { agentManager.allowAllConfirm = true; agentManager.denyAllConfirm = false }
+                                    allowAllResetTask?.cancel()
+                                    allowAllResetTask = Task { try? await Task.sleep(for: .seconds(5)); withAnimation { agentManager.allowAllConfirm = false } }
+                                }
                             } label: {
-                                Label("Allow All (\(permissions.count))", systemImage: "checkmark.circle")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .background(.white.opacity(0.1))
-                                    .foregroundStyle(.green)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                Label(
+                                    agentManager.allowAllConfirm ? "Confirm Allow All?" : "Allow All (\(permissions.count))",
+                                    systemImage: "checkmark.circle"
+                                )
+                                .font(.system(size: 11, weight: .medium))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .background(.white.opacity(agentManager.allowAllConfirm ? 0.18 : 0.1))
+                                .foregroundStyle(.green)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
                             .buttonStyle(.plain)
 
                             Button {
-                                for req in permissions { agentManager.denyPermission(id: req.id) }
+                                if agentManager.denyAllConfirm {
+                                    for req in permissions { agentManager.denyPermission(id: req.id) }
+                                    agentManager.denyAllConfirm = false
+                                } else {
+                                    withAnimation(.easeInOut(duration: 0.15)) { agentManager.denyAllConfirm = true; agentManager.allowAllConfirm = false }
+                                    denyAllResetTask?.cancel()
+                                    denyAllResetTask = Task { try? await Task.sleep(for: .seconds(5)); withAnimation { agentManager.denyAllConfirm = false } }
+                                }
                             } label: {
-                                Label("Deny All", systemImage: "xmark.circle")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .background(.white.opacity(0.08))
-                                    .foregroundStyle(.red.opacity(0.8))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                Label(
+                                    agentManager.denyAllConfirm ? "Confirm Deny All?" : "Deny All",
+                                    systemImage: "xmark.circle"
+                                )
+                                .font(.system(size: 11, weight: .medium))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .background(.white.opacity(agentManager.denyAllConfirm ? 0.14 : 0.08))
+                                .foregroundStyle(.red.opacity(0.8))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
                             .buttonStyle(.plain)
                         }
@@ -200,7 +232,9 @@ struct NotchContentView: View {
                     // attached to the project it came from (sortedSessions
                     // already puts `waitingForPermission` at the top).
                     ForEach(sessions, id: \.id) { session in
-                        SessionCard(session: session, agentManager: agentManager)
+                        SessionCard(session: session, agentManager: agentManager) { msg in
+                            showToast(msg)
+                        }
                     }
                 }
                 .padding(.horizontal, 10)
@@ -223,6 +257,33 @@ struct NotchContentView: View {
                     endPoint: .bottom
                 )
             )
+            // Toast MUST be after .mask — otherwise the gradient fades it
+            // to invisible right at the bottom where it appears.
+            .overlay(alignment: .bottom) {
+                if let toast = toastMessage {
+                    Text(toast)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(.blue.opacity(0.45)))
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .padding(.bottom, 28)
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: toastMessage)
+        }
+    }
+
+    // MARK: - Toast
+
+    private func showToast(_ message: String) {
+        toastGeneration += 1
+        let gen = toastGeneration
+        toastMessage = message
+        Task {
+            try? await Task.sleep(for: .seconds(2.5))
+            if toastGeneration == gen { toastMessage = nil }
         }
     }
 
@@ -283,6 +344,7 @@ struct NotchContentView: View {
 struct SessionCard: View {
     let session: AgentSession
     let agentManager: AgentManager
+    var onToast: (String) -> Void = { _ in }
     @State private var hovering = false
     @State private var jumpHovering = false
 
@@ -306,16 +368,21 @@ struct SessionCard: View {
             if let req = session.pendingPermission {
                 PermissionBanner(
                     request: req,
-                    queuePosition: 1, queueTotal: 1,   // single-per-session, hide numbering
+                    queuePosition: 1, queueTotal: 1,
                     onAllow: { agentManager.approvePermission(id: req.id) },
                     onAlwaysAllow: {
                         let input = req.toolInput.mapValues { $0.value }
                         let pattern = AllowRules.primaryArg(toolName: req.toolName, input: input)
                         AllowRules.add(.init(toolName: req.toolName, pattern: pattern))
                         agentManager.approvePermission(id: req.id)
+                        onToast("Always allow \(req.toolName) — rule saved")
                     },
                     onBypass: { agentManager.bypassPermission(id: req.id) },
-                    onDeny: { agentManager.denyPermission(id: req.id) }
+                    onDeny: { agentManager.denyPermission(id: req.id) },
+                    bypassArmedId: .init(
+                        get: { agentManager.bypassArmedId },
+                        set: { agentManager.bypassArmedId = $0 }
+                    )
                 )
             } else if let question = session.pendingQuestion {
                 QuestionBanner(
@@ -445,10 +512,11 @@ struct SessionCard: View {
                 }
             }
 
-            // Terminal jump button — only visible on hover, and only when
-            // there's no inline banner (the banner already provides its own
-            // jump CTA, so showing both would be visual noise).
-            if !hasInlineBanner {
+            // Terminal jump button — visible on hover. Hidden only when a
+            // QuestionBanner is showing (it has its own "Answer in terminal"
+            // CTA). Permission banners KEEP the jump button so users can
+            // check context in the terminal before deciding.
+            if session.pendingQuestion == nil {
                 Button(action: { TerminalJumper.jump(to: session) }) {
                     Image(systemName: "arrow.up.right.square")
                         .font(.system(size: 14, weight: .medium))

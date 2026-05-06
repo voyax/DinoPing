@@ -8,9 +8,6 @@ public struct HookInstaller {
     private let port: Int
     private let bridgePath: String
 
-    /// AgentPulse identifier used to detect our hooks (for cleanup/update).
-    private static let hookMarker = "agentpulse"
-
     public enum InstallError: Error, LocalizedError {
         /// `~/.claude/settings.json` exists but isn't valid JSON. We refuse
         /// to overwrite it because doing so would silently destroy the
@@ -111,7 +108,7 @@ public struct HookInstaller {
         settings["hooks"] = hooks
         try writeJSONFile(settings, to: settingsPath)
 
-        print("[AgentPulse] Claude Code hooks installed (HTTP monitoring + bridge approval)")
+        Logger.app.info("Claude Code hooks installed (HTTP monitoring + bridge approval)")
     }
 
     // MARK: - Bridge Binary
@@ -139,18 +136,18 @@ public struct HookInstaller {
                     [.posixPermissions: 0o755],
                     ofItemAtPath: destURL.path
                 )
-                print("[AgentPulse] Bridge installed at \(destURL.path)")
+                Logger.app.info("Bridge installed at \(destURL.path, privacy: .public)")
                 return
             }
         }
 
         // Fallback: check if already installed
         if FileManager.default.fileExists(atPath: destURL.path) {
-            print("[AgentPulse] Bridge already at \(destURL.path)")
+            Logger.app.info("Bridge already at \(destURL.path, privacy: .public)")
             return
         }
 
-        print("[AgentPulse] ⚠️ Bridge binary not found — permission approval via notch won't work")
+        Logger.app.warning("Bridge binary not found — permission approval via notch won't work")
     }
 
     // MARK: - Uninstall
@@ -180,7 +177,7 @@ public struct HookInstaller {
 
         settings["hooks"] = hooks.isEmpty ? nil : hooks
         try writeJSONFile(settings, to: settingsPath)
-        print("[AgentPulse] Hooks uninstalled")
+        Logger.app.info("Hooks uninstalled")
     }
 
     // MARK: - Private Helpers

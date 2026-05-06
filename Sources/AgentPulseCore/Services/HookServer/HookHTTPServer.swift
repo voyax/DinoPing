@@ -5,6 +5,10 @@ import os
 /// Local HTTP server that receives Claude Code hook events.
 public actor HookHTTPServer {
     private let port: Int
+    /// Per-launch random token for CSRF protection on /api/approve.
+    /// Written to `~/.agentpulse/.launch-token` (0600) at startup;
+    /// bridge reads it and sends as `X-AgentPulse-Token` header.
+    nonisolated let launchToken: String?
     private var app: Application<RouterResponder<BasicRequestContext>>?
     public var eventHandler: (@Sendable (HookEvent) async -> HookResponse)?
 
@@ -16,8 +20,9 @@ public actor HookHTTPServer {
     /// Implementer is expected to be `@MainActor`.
     public var debugHandler: (@Sendable (String) async -> String)?
 
-    public init(port: Int = Constants.defaultPort) {
+    public init(port: Int = Constants.defaultPort, launchToken: String? = nil) {
         self.port = port
+        self.launchToken = launchToken
     }
 
     public func start() async throws {
@@ -44,6 +49,8 @@ public actor HookHTTPServer {
     private func buildRouter() -> Router<BasicRequestContext> {
         let router = Router()
         let handler = self
+        let csrfToken = self.launchToken
+        let expectedPort = self.port
 
         router.post("hooks/session-start") { request, context -> Response in
             try await handler.handleRoute(request: request, context: context, eventType: .sessionStart)
@@ -60,9 +67,9 @@ public actor HookHTTPServer {
         router.post("hooks/post-tool-use-failure") { request, context -> Response in
             try await handler.handleRoute(request: request, context: context, eventType: .postToolUseFailure)
         }
-        router.post("hooks/permission-request") { request, context -> Response in
-            try await handler.handleRoute(request: request, context: context, eventType: .permissionRequest)
-        }
+        // NOTE: No /hooks/permission-request route. PermissionRequest flows
+        // through the bridge CLI → /api/approve (blocking). An HTTP route here
+        // would create duplicate permission cards if accidentally enabled.
         router.post("hooks/notification") { request, context -> Response in
             try await handler.handleRoute(request: request, context: context, eventType: .notification)
         }
@@ -92,17 +99,42 @@ public actor HookHTTPServer {
         // user would click and nothing would happen, because the response
         // can't be written to a closed connection.
         router.post("api/approve") { request, context -> Response in
+            // CSRF: per-launch token — rejects requests from anything that
+            // hasn't read ~/.agentpulse/.launch-token (0600). A browser tab
+            // doing fetch("http://127.0.0.1:21477/api/approve") can't read
+            // the file, so it can't provide the token.
+            if let csrfToken {
+                let provided = request.headers[.init("X-AgentPulse-Token")!]
+                guard provided == csrfToken else {
+                    Logger.hookServer.warning("Rejected /api/approve: invalid or missing CSRF token")
+                    return Response(status: .forbidden)
+                }
+            }
+            // DNS-rebinding: reject requests with a non-localhost Origin.
+            // Browsers MUST send Origin on cross-origin POST; the bridge
+            // (URLSession) doesn't send Origin at all, so its requests pass.
+            if let origin = request.headers[.init("Origin")!] {
+                let allowed = [
+                    "http://127.0.0.1:\(expectedPort)",
+                    "http://localhost:\(expectedPort)",
+                ]
+                if !allowed.contains(origin) {
+                    Logger.hookServer.warning("Rejected /api/approve: non-localhost Origin")
+                    return Response(status: .forbidden)
+                }
+            }
+
             let agentType = request.headers[.init("X-Agent-Type")!] ?? "claude"
             do {
                 return try await request.body.consumeWithCancellationOnInboundClose { body in
                     let bodyBuffer = try await body.collect(upTo: 1_048_576)
-                    print("[AgentPulse] 🔔 Bridge approval request from \(agentType)")
+                    Logger.hookServer.info("Bridge approval request from \(agentType, privacy: .public)")
 
                     let payload: HookPayload
                     do {
                         payload = try JSONDecoder().decode(HookPayload.self, from: bodyBuffer)
                     } catch {
-                        print("[AgentPulse] ❌ Bridge JSON decode failed: \(error)")
+                        Logger.hookServer.error("Bridge JSON decode failed: \(error.localizedDescription, privacy: .public)")
                         return Response(status: .ok) // Fail-open
                     }
 
@@ -129,7 +161,7 @@ public actor HookHTTPServer {
                 // so the UI is being cleaned up on its own. We still need to
                 // return *something* to satisfy the route signature; nobody is
                 // reading this anyway because the connection is gone.
-                print("[AgentPulse] 🔌 Bridge disconnected before decision — UI cleared")
+                Logger.hookServer.info("Bridge disconnected before decision — UI cleared")
                 return Response(status: .ok)
             }
         }
@@ -220,7 +252,7 @@ public actor HookHTTPServer {
                 stopHookActive: nil, agentName: nil, agentDescription: nil,
                 parentSessionId: nil, source: nil
             )
-            print("[AgentPulse] 🧪 Test approval triggered — waiting for notch decision...")
+            Logger.hookServer.info("Test approval triggered — waiting for notch decision")
 
             guard let approvalHandler = await handler.approvalHandler else {
                 return Response(status: .ok, body: .init(byteBuffer: .init(string: "No approval handler")))
@@ -229,7 +261,7 @@ public actor HookHTTPServer {
             // This BLOCKS until user clicks in notch
             let response = await approvalHandler(fakePayload, "test")
             let data = try JSONEncoder().encode(response)
-            print("[AgentPulse] 🧪 Test approval complete")
+            Logger.hookServer.info("Test approval complete")
             return Response(
                 status: .ok,
                 headers: [.contentType: "application/json"],
@@ -244,7 +276,7 @@ public actor HookHTTPServer {
     private enum EventType: Sendable {
         case sessionStart, sessionEnd
         case preToolUse, postToolUse, postToolUseFailure
-        case permissionRequest, notification
+        case notification
         case stop, subagentStart, subagentStop
         case userPromptSubmit
     }
@@ -301,7 +333,6 @@ public actor HookHTTPServer {
         case .preToolUse: .preToolUse(payload)
         case .postToolUse: .postToolUse(payload)
         case .postToolUseFailure: .postToolUseFailure(payload)
-        case .permissionRequest: .permissionRequest(payload)
         case .notification: .notification(payload)
         case .stop: .stop(payload)
         case .subagentStart: .subagentStart(payload)
@@ -309,7 +340,7 @@ public actor HookHTTPServer {
         case .userPromptSubmit: .userPromptSubmit(payload)
         }
 
-        print("[AgentPulse] ✅ Parsed: \(payload.hookEventName) session=\(payload.sessionId.prefix(8)) tool=\(payload.toolName ?? "none")")
+        Logger.hookServer.info("Parsed: \(payload.hookEventName, privacy: .public) session=\(payload.sessionId.prefix(8), privacy: .public) tool=\(payload.toolName ?? "none", privacy: .public)")
 
         guard let handler = eventHandler else {
             return Response(status: .ok)

@@ -114,6 +114,7 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
                     recentTools.removeLast()
                 }
             }
+            status = .active
 
         case .permissionRequested(let req):
             status = .waitingForPermission
@@ -121,9 +122,7 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
 
         case .permissionResolved:
             pendingPermission = nil
-            if status == .waitingForPermission {
-                status = .active
-            }
+            status = .active
 
         case .notified:
             status = .waitingForInput

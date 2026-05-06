@@ -6,9 +6,18 @@ import os
 public final class AgentManager {
     public private(set) var sessions: [String: AgentSession] = [:]
     public var pendingPermissions: [PermissionRequest] = []
+    /// Per-permission bypass-confirm: the request ID that's currently armed
+    /// for bypass. Both keyboard (NotchPanel) and UI (PermissionBanner)
+    /// read/write this so the visual "Confirm?" is scoped to one banner.
+    public var bypassArmedId: String?
+    /// Bulk confirm states — on AgentManager so NotchPanel can pause hover
+    /// collapse while the user is mid-confirm on Allow All / Deny All.
+    public var allowAllConfirm: Bool = false
+    public var denyAllConfirm: Bool = false
     public let permissionService = PermissionService()
     private let transcriptReader = TranscriptReader()
     private var discoveryTask: Task<Void, Never>?
+    private var refreshDebounceTask: Task<Void, Never>?
     public private(set) var transcriptWatcher: TranscriptWatcher?
 
     public init() {
@@ -30,13 +39,15 @@ public final class AgentManager {
                 guard !seenCwds.contains(info.cwd) else { continue }
                 seenCwds.insert(info.cwd)
                 let session = AgentSession(id: info.sessionId, agentKind: info.agentKind, cwd: info.cwd)
+                // Direct set: initialization of discovered session, not a state
+                // transition — session hasn't entered the event flow yet.
                 session.status = .waitingForInput
                 session.pid = info.pid
                 session.lastUserPrompt = prompt
                 self.sessions[info.sessionId] = session
             }
             if !discovered.isEmpty {
-                print("[AgentPulse] 🔍 Discovered \(discovered.count) existing session(s)")
+                Logger.agentManager.info("Discovered \(discovered.count, privacy: .public) existing sessions")
             }
         }
     }
@@ -76,58 +87,105 @@ public final class AgentManager {
             reader.latestUserPrompt(cwd: cwd, sessionId: sessionId)
         }.value
 
-        // Apply reducer
+        // Apply reducer. Permission registration happens exclusively in
+        // the bridge approval handler (AppState), not here — the HTTP hook
+        // route for PermissionRequest was deleted.
         await MainActor.run {
             let session = self.getOrCreateSession(id: sessionId, cwd: payload.cwd)
             session.apply(agentEvent)
             if let latestPrompt { session.lastUserPrompt = latestPrompt }
 
-            if case .permissionRequested(let req) = agentEvent {
-                if !self.pendingPermissions.contains(where: { $0.id == req.id }) {
-                    self.pendingPermissions.append(req)
+            // Post-reducer reconciliation for stale permissions and questions.
+            //
+            // CRITICAL: only check after events that prove external resolution
+            // (tool executing, session ended). NOT on .notified, .subagent*,
+            // .questionAsked — those can arrive while legitimately pending.
+            if Self.isExternalResolutionSignal(agentEvent) {
+                // Stale permission: tool started = permission granted in terminal
+                if session.pendingPermission != nil {
+                    let orphanIds = self.pendingPermissions
+                        .filter { $0.sessionId == sessionId }
+                        .map(\.id)
+                    self.resolvePermissions(
+                        ids: orphanIds,
+                        decision: .deny(reason: "Resolved externally")
+                    )
+                    session.apply(.permissionResolved)
+                }
+
+                // Stale question: a DIFFERENT tool started = user answered,
+                // Claude moved on. Skip if this is AskUserQuestion's own
+                // tool event (same toolUseId) — the reducer handles that.
+                if session.pendingQuestion != nil {
+                    let eventToolUseId: String? = switch agentEvent {
+                    case .toolStarted(let t): t.id
+                    case .toolSucceeded(let id), .toolFailed(_, let id): id
+                    default: nil
+                    }
+                    if eventToolUseId != session.pendingQuestionToolUseId {
+                        session.pendingQuestion = nil
+                        session.pendingQuestionToolUseId = nil
+                    }
                 }
             }
         }
 
         // Re-read transcript shortly after the hook — hooks often fire
-        // *before* the message is fully written to the jsonl file. A short
-        // delay lets the write complete so we pick up the latest content.
-        Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
-            await self?.refreshAllPrompts()
-        }
+        // *before* the message is fully written to the jsonl file. Debounced:
+        // only the last event in a burst triggers the refresh (60 rapid hooks
+        // no longer spawn 60 independent transcript reads).
+        await MainActor.run { self.schedulePromptRefresh() }
 
         return .empty
     }
 
-    // MARK: - User Actions (Fix #12: separate bypass from allow)
+    // MARK: - Permission Resolution
+    //
+    // Every permission resolution must do the "triple write":
+    //   1. Remove from pendingPermissions array (drives pill count)
+    //   2. Clear session.pendingPermission (drives inline banner)
+    //   3. Resume the PermissionService continuation (unblocks bridge)
+    // All 3 must stay in sync; resolvePermission is the single entry point.
 
     public func approvePermission(id: String) {
-        pendingPermissions.removeAll { $0.id == id }
-        for s in sessions.values where s.pendingPermission?.id == id { s.apply(.permissionResolved) }
-        Task { await permissionService.resolve(requestId: id, decision: .allow) }
+        resolvePermission(id: id, decision: .allow)
     }
 
     public func bypassPermission(id: String) {
-        pendingPermissions.removeAll { $0.id == id }
-        for s in sessions.values where s.pendingPermission?.id == id { s.apply(.permissionResolved) }
-        Task { await permissionService.resolve(requestId: id, decision: .bypass) }
+        resolvePermission(id: id, decision: .bypass)
     }
 
     public func denyPermission(id: String, reason: String = "Denied by user") {
+        resolvePermission(id: id, decision: .deny(reason: reason))
+    }
+
+    /// Single coordinator for the triple write. Safe to call multiple times
+    /// for the same id — each step is individually idempotent.
+    public func resolvePermission(id: String, decision: PermissionDecision) {
         pendingPermissions.removeAll { $0.id == id }
-        for s in sessions.values where s.pendingPermission?.id == id { s.apply(.permissionResolved) }
-        Task { await permissionService.resolve(requestId: id, decision: .deny(reason: reason)) }
+        for s in sessions.values where s.pendingPermission?.id == id {
+            s.apply(.permissionResolved)
+        }
+        Task { await permissionService.resolve(requestId: id, decision: decision) }
+    }
+
+    /// Batch-resolve multiple permissions with the same decision.
+    private func resolvePermissions(ids: [String], decision: PermissionDecision) {
+        guard !ids.isEmpty else { return }
+        pendingPermissions.removeAll { ids.contains($0.id) }
+        for session in sessions.values where ids.contains(session.pendingPermission?.id ?? "") {
+            session.apply(.permissionResolved)
+        }
+        for id in ids {
+            Task { await permissionService.resolve(requestId: id, decision: decision) }
+        }
     }
 
     // MARK: - Private
 
-    /// Clean up pending permissions that have been resolved outside the notch
-    /// (e.g. user approved in the terminal, or the tool finished, or the
-    /// session ended). When `toolUseId` is non-nil we only match the specific
-    /// request whose `toolUseId` matches — so concurrent tools in the same
-    /// session don't wipe each other. Match is on `request.toolUseId`, not
-    /// `request.id`, since `id` is a fresh UUID per request now.
+    /// Clean up pending permissions resolved outside the notch (terminal
+    /// approval, tool completion, session end). Scoped by toolUseId when
+    /// available so parallel tools don't wipe each other's cards.
     private func cleanupResolvedPermissions(sessionId: String, toolUseId: String?) {
         let staleIds: [String]
         if let toolUseId, !toolUseId.isEmpty {
@@ -135,17 +193,9 @@ public final class AgentManager {
                 .filter { $0.sessionId == sessionId && $0.toolUseId == toolUseId }
                 .map(\.id)
         } else {
-            // No toolUseId (Stop / SessionEnd) → clear everything for the session.
             staleIds = pendingPermissions.filter { $0.sessionId == sessionId }.map(\.id)
         }
-        guard !staleIds.isEmpty else { return }
-        pendingPermissions.removeAll { staleIds.contains($0.id) }
-        for session in sessions.values where staleIds.contains(session.pendingPermission?.id ?? "") {
-            session.apply(.permissionResolved)
-        }
-        for id in staleIds {
-            Task { await permissionService.resolve(requestId: id, decision: .deny(reason: "Resolved in terminal")) }
-        }
+        resolvePermissions(ids: staleIds, decision: .deny(reason: "Resolved in terminal"))
     }
 
     @discardableResult
@@ -160,24 +210,65 @@ public final class AgentManager {
         return session
     }
 
-    /// Removes every session — used by `/debug/sessions/clear`.
-    public func debugRemoveAllSessions() {
-        sessions.removeAll()
+    /// Events that prove a permission was resolved externally (terminal
+    /// approval, session end). Used by the post-reducer cleanup to avoid
+    /// false positives from events like `.notified` that change status
+    /// without implying permission was granted.
+    private static func isExternalResolutionSignal(_ event: AgentEvent) -> Bool {
+        switch event {
+        case .toolStarted, .toolSucceeded, .toolFailed,
+             .sessionEnded, .stopped, .userPromptSubmitted:
+            return true
+        case .sessionStarted, .permissionRequested, .permissionResolved,
+             .notified, .subagentStarted, .subagentStopped, .questionAsked:
+            return false
+        }
     }
 
-    /// Removes sessions created by test/debug endpoints (IDs starting with
-    /// "test-" or "debug-session"). Prevents test artifacts from cluttering
-    /// the real session list.
-    public func cleanupTestSessions() {
-        // Real IDs: hex UUIDs ("64c6ce89-...") or PID-based ("proc-1234").
-        // Anything else is a test/debug artifact.
-        let hexChars = CharacterSet(charactersIn: "0123456789abcdef")
-        let testIds = sessions.keys.filter { id in
-            if id.hasPrefix("proc-") { return false }
-            let prefix = String(id.prefix(8))
-            return prefix.unicodeScalars.contains(where: { !hexChars.contains($0) })
+    /// Remove a session and unwatch its transcript file.
+    private func removeSession(_ id: String) {
+        guard let session = sessions[id] else { return }
+        if let url = transcriptReader.transcriptURL(cwd: session.cwd, sessionId: session.id) {
+            transcriptWatcher?.unwatch(path: url.path)
         }
-        for id in testIds { sessions.removeValue(forKey: id) }
+        sessions.removeValue(forKey: id)
+    }
+
+    /// Removes every session — used by `/debug/sessions/clear`.
+    public func debugRemoveAllSessions() {
+        for id in Array(sessions.keys) {
+            denyPendingPermissions(forSessionId: id, reason: "Debug clear")
+            removeSession(id)
+        }
+    }
+
+    /// Removes sessions created by test/debug endpoints. Matches the known
+    /// prefixes used by `/debug/test/*` and `/test/approve` routes.
+    public func cleanupTestSessions() {
+        let testPrefixes = ["test-", "debug-", "fake-"]
+        let testIds = sessions.keys.filter { id in
+            testPrefixes.contains(where: { id.hasPrefix($0) })
+        }
+        for id in testIds { removeSession(id) }
+    }
+
+    /// Remove pendingPermissions entries whose session no longer has a
+    /// matching `pendingPermission`. These orphans arise when a resolution
+    /// path clears the per-session field but misses the array (e.g., terminal
+    /// approval via PostToolUse with a mismatched toolUseId, or a race between
+    /// the bridge and an event handler). Called every 30s from the cleanup loop.
+    public func reconcilePendingPermissions() {
+        let now = Date.now
+        let staleIds = pendingPermissions.filter { req in
+            // Only reconcile entries older than 10s — a fresh permission might
+            // still be in flight between the approval handler's MainActor.run
+            // blocks. 10s is generous; the post-reducer cleanup in handleEvent
+            // is the primary fix, this is the safety net.
+            guard now.timeIntervalSince(req.receivedAt) > 10 else { return false }
+            guard let session = sessions[req.sessionId] else { return true }
+            return session.pendingPermission?.id != req.id
+        }.map(\.id)
+        resolvePermissions(ids: staleIds, decision: .deny(reason: "Stale (reconciled)"))
     }
 
     public func cleanupStaleSessions() {
@@ -198,27 +289,22 @@ public final class AgentManager {
         }.map(\.key)
         for id in staleIds {
             denyPendingPermissions(forSessionId: id, reason: "Session ended")
-            sessions.removeValue(forKey: id)
+            removeSession(id)
         }
     }
 
-    /// Resolve any pending permissions belonging to a session that's about
-    /// to be removed. Without this, an orphan card can outlive its session
-    /// in the UI and the bridge continuation leaks until 24h backstop fires.
-    ///
-    /// Mirrors the (manager array + per-session field + actor resume) trio
-    /// of `approvePermission`/`denyPermission` so the helper is safe to
-    /// reuse from any caller — not just the cleanup paths that happen to
-    /// remove the session in the same cycle.
+    /// Deny all pending permissions for a session about to be removed.
     private func denyPendingPermissions(forSessionId sessionId: String, reason: String) {
         let orphanIds = pendingPermissions.filter { $0.sessionId == sessionId }.map(\.id)
-        guard !orphanIds.isEmpty else { return }
-        pendingPermissions.removeAll { $0.sessionId == sessionId }
-        for s in sessions.values where orphanIds.contains(s.pendingPermission?.id ?? "") {
-            s.apply(.permissionResolved)
-        }
-        for id in orphanIds {
-            Task { await permissionService.resolve(requestId: id, decision: .deny(reason: reason)) }
+        resolvePermissions(ids: orphanIds, decision: .deny(reason: reason))
+    }
+
+    private func schedulePromptRefresh() {
+        refreshDebounceTask?.cancel()
+        refreshDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            await self?.refreshAllPrompts()
         }
     }
 
@@ -294,7 +380,7 @@ public final class AgentManager {
                    existingCwds.contains(info.cwd) { continue }
 
                 let session = AgentSession(id: info.sessionId, agentKind: info.agentKind, cwd: info.cwd)
-                session.status = .waitingForInput
+                session.status = .waitingForInput  // initialization, not transition
                 session.pid = info.pid
                 session.lastUserPrompt = prompt
                 sessions[info.sessionId] = session
@@ -313,9 +399,8 @@ public final class AgentManager {
             } else {
                 session.missedHeartbeats += 1
                 if session.missedHeartbeats >= 2, session.status != .done {
-                    session.status = .done
-                    session.lastEventTime = .now  // start the 8s grace timer
-                    print("[AgentPulse] 💀 Process \(pid) gone — \(session.projectName) done")
+                    session.apply(.sessionEnded)
+                    Logger.agentManager.info("Process \(pid, privacy: .public) gone — \(session.projectName, privacy: .public) done")
                 }
             }
         }
@@ -331,7 +416,7 @@ public final class AgentManager {
         }.map(\.key)
         for id in removeIds {
             denyPendingPermissions(forSessionId: id, reason: "Session ended")
-            sessions.removeValue(forKey: id)
+            removeSession(id)
         }
     }
 }

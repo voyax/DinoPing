@@ -38,6 +38,36 @@ final class AgentPulsePanel: NSPanel {
         guard let idx = sender.representedObject as? Int else { return }
         AllowRules.removeAt(index: idx)
     }
+
+    @objc func menuUninstallHooks(_ sender: NSMenuItem) {
+        let alert = NSAlert()
+        alert.messageText = "Uninstall AgentPulse hooks?"
+        alert.informativeText = """
+            This removes all AgentPulse hooks from ~/.claude/settings.json. \
+            The app will quit after uninstalling.
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Uninstall & Quit")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try HookInstaller().uninstall()
+            UserDefaults.standard.removeObject(forKey: "hookConsentGiven")
+            // Clean up launch token
+            let tokenURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".agentpulse/.launch-token")
+            try? FileManager.default.removeItem(at: tokenURL)
+        } catch {
+            let errAlert = NSAlert()
+            errAlert.messageText = "Uninstall failed"
+            errAlert.informativeText = error.localizedDescription
+            errAlert.runModal()
+            return
+        }
+        NSApp.terminate(nil)
+    }
 }
 
 // (No NSHostingView subclass needed — click-through is handled at the panel
@@ -78,6 +108,7 @@ final class NotchPanel {
     private var localRightClickMonitor: Any?
     private var localKeyMonitor: Any?
     private var lastMouseInSilhouette: Bool = false
+    private var bypassResetTask: Task<Void, Never>?
 
     init(agentManager: AgentManager) {
         self.agentManager = agentManager
@@ -424,7 +455,18 @@ final class NotchPanel {
             agentManager.approvePermission(id: perm.id)
             return true
         case "b":
-            agentManager.bypassPermission(id: perm.id)
+            if agentManager.bypassArmedId == perm.id {
+                agentManager.bypassArmedId = nil
+                bypassResetTask?.cancel()
+                agentManager.bypassPermission(id: perm.id)
+            } else {
+                agentManager.bypassArmedId = perm.id
+                bypassResetTask?.cancel()
+                bypassResetTask = Task {
+                    try? await Task.sleep(for: .seconds(5))
+                    self.agentManager.bypassArmedId = nil
+                }
+            }
             return true
         default:
             return false
@@ -559,7 +601,13 @@ final class NotchPanel {
                 collapseTask?.cancel()  // re-hover cancels pending collapse
             }
         } else if state == .expanded {
-            scheduleCollapse(delay: 0.2)
+            // Don't collapse while the user is mid-confirm on a destructive
+            // action — they need the panel to stay visible.
+            if agentManager.bypassArmedId != nil
+                || agentManager.allowAllConfirm
+                || agentManager.denyAllConfirm { return }
+            let delay: TimeInterval = agentManager.hasPendingPermissions ? 0.6 : 0.2
+            scheduleCollapse(delay: delay)
         }
     }
 
@@ -632,8 +680,16 @@ final class NotchPanel {
             }
         }
 
-        // Quit
+        // Uninstall + Quit
         menu.addItem(.separator())
+        let uninstall = NSMenuItem(
+            title: "Uninstall Hooks…",
+            action: #selector(AgentPulsePanel.menuUninstallHooks(_:)),
+            keyEquivalent: ""
+        )
+        uninstall.target = panel
+        menu.addItem(uninstall)
+
         let quit = NSMenuItem(title: "Quit AgentPulse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
@@ -658,5 +714,9 @@ final class NotchPanel {
         hoverTask?.cancel()
         collapseTask?.cancel()
         dormantTask?.cancel()
+        bypassResetTask?.cancel()
+        agentManager.bypassArmedId = nil
+        agentManager.allowAllConfirm = false
+        agentManager.denyAllConfirm = false
     }
 }

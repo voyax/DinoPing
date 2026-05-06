@@ -9,8 +9,13 @@ struct PermissionBanner: View {
     let onAlwaysAllow: () -> Void
     let onBypass: () -> Void
     let onDeny: () -> Void
+    /// Shared bypass-arm state scoped by request ID. Both the UI button
+    /// and ^B keyboard shortcut read/write this so "Confirm?" only shows
+    /// on the targeted banner, not all banners simultaneously.
+    @Binding var bypassArmedId: String?
 
     @State private var appeared = false
+    @State private var bypassResetTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -67,7 +72,22 @@ struct PermissionBanner: View {
                     .padding(.horizontal, 2)
 
                 PermissionButton(title: "Always", shortcut: "^A", style: .alwaysAllow, action: onAlwaysAllow)
-                PermissionButton(title: "Bypass", shortcut: "^B", style: .bypass, action: onBypass)
+                if bypassArmedId == request.id {
+                    PermissionButton(title: "Confirm?", shortcut: "", style: .bypassConfirm, action: {
+                        bypassResetTask?.cancel()
+                        bypassArmedId = nil
+                        onBypass()
+                    })
+                } else {
+                    PermissionButton(title: "Bypass", shortcut: "^B", style: .bypass, action: {
+                        withAnimation(.easeInOut(duration: 0.15)) { bypassArmedId = request.id }
+                        bypassResetTask?.cancel()
+                        bypassResetTask = Task {
+                            try? await Task.sleep(for: .seconds(5))
+                            withAnimation { bypassArmedId = nil }
+                        }
+                    })
+                }
             }
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
@@ -212,18 +232,17 @@ struct PermissionButton: View {
     let action: () -> Void
 
     enum Style {
-        case deny, allow, alwaysAllow, bypass
+        case deny, allow, alwaysAllow, bypass, bypassConfirm
 
         var bgColor: Color {
             switch self {
             case .deny: .white.opacity(0.08)
             case .allow: .white.opacity(0.1)
             case .alwaysAllow: .blue.opacity(0.25)
-            // Ghost: no fill, just text. Bypass permanently disables future
-            // prompts for this tool type — it should look LESS prominent than
-            // the safe Deny/Allow pair, not MORE. The old red fill was more
-            // eye-catching than Deny's gray, inverting the risk hierarchy.
             case .bypass: .clear
+            // Filled red — visually distinct from the ghost "Bypass" so the
+            // user notices the state changed and a second click is destructive.
+            case .bypassConfirm: .red.opacity(0.25)
             }
         }
 
@@ -233,6 +252,7 @@ struct PermissionButton: View {
             case .allow: .white.opacity(0.9)
             case .alwaysAllow: .blue
             case .bypass: .red.opacity(0.6)
+            case .bypassConfirm: .red
             }
         }
     }

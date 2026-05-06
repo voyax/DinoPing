@@ -22,11 +22,19 @@ guard !inputData.isEmpty else { exit(0) }
 // Determine the endpoint based on agent type and event
 let endpoint = "\(baseURL)/api/approve"
 
+// Read per-launch CSRF token (written by AgentPulse at startup, 0600).
+// If the file doesn't exist (app not running / fresh install), we still
+// proceed — the server will reject us with 403, and we fail-open below.
+let tokenPath = NSHomeDirectory() + "/.agentpulse/.launch-token"
+let launchToken = try? String(contentsOfFile: tokenPath, encoding: .utf8)
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+
 // POST to AgentPulse app
 var request = URLRequest(url: URL(string: endpoint)!)
 request.httpMethod = "POST"
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 request.setValue(agentFlag, forHTTPHeaderField: "X-Agent-Type")
+if let launchToken { request.setValue(launchToken, forHTTPHeaderField: "X-AgentPulse-Token") }
 request.httpBody = inputData
 // 86400s = 24h. Matches the PermissionRequest hook timeout in HookInstaller.
 // Claude Code has no async-push for hook decisions, so the bridge has to stay

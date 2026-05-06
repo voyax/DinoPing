@@ -100,7 +100,7 @@ public struct PermissionRequest: Identifiable, Sendable {
     }
 }
 
-public enum PermissionDecision: Sendable {
+public enum PermissionDecision: Sendable, Equatable {
     case allow
     case bypass
     case deny(reason: String)

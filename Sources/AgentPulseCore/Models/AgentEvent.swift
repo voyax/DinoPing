@@ -46,18 +46,9 @@ public enum AgentEvent: Sendable {
         case .postToolUseFailure:
             return .toolFailed(reason: "Tool call failed", toolUseId: p.toolUseId)
         case .permissionRequest:
-            // `id` is a fresh UUID, NOT toolUseId — see PermissionRequest doc.
-            // Two requests with the same toolUseId (Claude retry, parallel
-            // dispatch, etc.) get distinct ids so dedup doesn't drop one.
-            let req = PermissionRequest(
-                toolUseId: p.toolUseId,
-                sessionId: p.sessionId,
-                toolName: p.toolName ?? "Unknown",
-                toolInput: p.toolInput ?? [:],
-                cwd: p.cwd,
-                receivedAt: .now
-            )
-            return .permissionRequested(req)
+            // Dead path: the HTTP route was deleted. Permissions flow
+            // exclusively through the bridge → /api/approve → AppState.
+            fatalError("permissionRequest should never arrive via HTTP hook")
         case .notification:
             return .notified
         case .stop:

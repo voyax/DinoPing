@@ -7,7 +7,7 @@ import os
 final class AppState {
     let agentManager = AgentManager()
     private(set) var notchPanel: NotchPanel?
-    private let hookServer = HookHTTPServer()
+    private let hookServer: HookHTTPServer
     private let hookInstaller = HookInstaller()
     private var serverTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
@@ -15,34 +15,56 @@ final class AppState {
     private var lastKnownPermCount = 0
 
     init() {
+        let token = UUID().uuidString
+        Self.writeLaunchToken(token)
+        self.hookServer = HookHTTPServer(launchToken: token)
         startServices()
         Task { @MainActor in
             self.setupNotchUI()
         }
     }
 
+    /// Write a per-launch CSRF token to disk so the bridge can read it.
+    /// Uses restrictive umask so the file is NEVER world-readable, not even
+    /// for the brief window between write and chmod.
+    private static func writeLaunchToken(_ token: String) {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".agentpulse")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Harden the directory itself — 0700 prevents other local users
+        // from listing contents or racing to read the token file.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: dir.path
+        )
+        let path = dir.appendingPathComponent(".launch-token").path
+        // Set umask to 0077 so the file is created 0600 atomically —
+        // no window where it's world-readable.
+        let oldMask = umask(0o077)
+        defer { umask(oldMask) }
+        try? token.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - Services
 
     private func startServices() {
-        print("[AgentPulse] 🚀 Starting services...")
+        Logger.app.info("Starting services")
 
-        do {
-            try hookInstaller.installClaudeCodeHooks()
-        } catch let error as HookInstaller.InstallError {
-            // Settings.json is corrupt — refuse to overwrite. Surface to user
-            // via NSAlert so they actually know we couldn't install (vs the
-            // app silently launching with no monitoring active).
-            print("[AgentPulse] ❌ \(error.localizedDescription)")
-            DispatchQueue.main.async {
-                let alert = NSAlert()
-                alert.messageText = "AgentPulse couldn't install Claude Code hooks"
-                alert.informativeText = error.localizedDescription
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
+        if shouldInstallHooks() {
+            do {
+                try hookInstaller.installClaudeCodeHooks()
+            } catch let error as HookInstaller.InstallError {
+                Logger.app.error("Hook install: \(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "AgentPulse couldn't install Claude Code hooks"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+            } catch {
+                Logger.app.error("Hook install failed: \(error.localizedDescription, privacy: .public)")
             }
-        } catch {
-            print("[AgentPulse] ❌ Hook install failed: \(error)")
         }
 
         let manager = agentManager
@@ -50,11 +72,6 @@ final class AppState {
 
         serverTask = Task.detached {
             await server.setEventHandler { event in
-                if case .permissionRequest = event {
-                    Task { @MainActor in
-                        SoundManager.shared.play(.permissionNeeded)
-                    }
-                }
                 return await manager.handleEvent(event)
             }
 
@@ -74,7 +91,7 @@ final class AppState {
                     let question = AskUserQuestion.parse(from: toolInput)
                         ?? AskUserQuestion.placeholder
                     if AskUserQuestion.parse(from: toolInput) == nil {
-                        print("[AgentPulse] ⚠️ AskUserQuestion parse failed; rendering placeholder")
+                        Logger.app.warning("AskUserQuestion parse failed; rendering placeholder")
                     }
                     let toolUseId = payload.toolUseId
                     await MainActor.run {
@@ -108,25 +125,16 @@ final class AppState {
                     manager.getOrCreateSession(id: payload.sessionId, cwd: payload.cwd)
                     manager.pendingPermissions.append(req)
                     manager.sessions[payload.sessionId]?.apply(.permissionRequested(req))
-                    SoundManager.shared.play(.permissionNeeded)
+                    // Sound is played by updatePanelState which observes
+                    // pendingPermissions.count — no need to play here too.
                 }
 
                 let decision = await manager.permissionService.awaitDecision(for: requestId)
 
+                // Cleanup via the coordinator — idempotent if the user
+                // already clicked in the notch (resolvePermission ran).
                 await MainActor.run {
-                    manager.pendingPermissions.removeAll { $0.id == requestId }
-                    // Also clear the per-session field. SessionCard reads
-                    // `session.pendingPermission` (not the manager array)
-                    // when deciding to render the orange banner. Skipping
-                    // this leaves an orphan card after bridge disconnect:
-                    // user clicks → approvePermission no-ops because the
-                    // array is already empty AND the resolved set blocks
-                    // the resolve. This was the same bug we already fixed
-                    // for `pendingPermissions`, just one layer deeper.
-                    if let session = manager.sessions[payload.sessionId],
-                       session.pendingPermission?.id == requestId {
-                        session.apply(.permissionResolved)
-                    }
+                    manager.resolvePermission(id: requestId, decision: decision)
                 }
 
                 switch decision {
@@ -139,7 +147,7 @@ final class AppState {
             do {
                 try await server.start()
             } catch {
-                print("[AgentPulse] ❌ Server failed: \(error)")
+                Logger.app.error("Server failed: \(error.localizedDescription, privacy: .public)")
             }
         }
 
@@ -156,6 +164,7 @@ final class AppState {
                 }
                 self.agentManager.cleanupStaleSessions()
                 self.agentManager.cleanupTestSessions()
+                self.agentManager.reconcilePendingPermissions()
                 // Every ~60s, re-scan for processes we may have missed or
                 // whose sessions got cleaned up while still alive.
                 tick += 1
@@ -170,7 +179,7 @@ final class AppState {
         // a write (e.g., file was replaced instead of appended).
         agentManager.installTranscriptWatcher()
 
-        print("[AgentPulse] ✅ Services started")
+        Logger.app.info("Services started")
     }
 
     // MARK: - Notch UI
@@ -186,7 +195,7 @@ final class AppState {
 
         installDebugHandler()
 
-        print("[AgentPulse] ✅ Notch UI ready")
+        Logger.app.info("Notch UI ready")
     }
 
     /// Wires the HookHTTPServer's `debugHandler` to live AgentManager + NotchPanel
@@ -393,6 +402,48 @@ final class AppState {
             }
         }
         lastKnownPermCount = permCount
+    }
+
+    // MARK: - First-Run Consent
+
+    /// Determines whether to install hooks, showing a consent dialog on first run.
+    /// Existing users (hooks already in settings.json) are auto-consented.
+    private func shouldInstallHooks() -> Bool {
+        if UserDefaults.standard.bool(forKey: "hookConsentGiven") { return true }
+
+        // Existing user: hooks already installed before consent was added.
+        let settingsPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.json").path
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: settingsPath)),
+           let str = String(data: data, encoding: .utf8),
+           str.contains("agentpulse") {
+            UserDefaults.standard.set(true, forKey: "hookConsentGiven")
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Set up AgentPulse?"
+        alert.informativeText = """
+            AgentPulse monitors AI coding agents from your Mac's notch. \
+            To enable this, it will:
+
+            • Add monitoring hooks to ~/.claude/settings.json
+            • Install a bridge binary at ~/.agentpulse/bin/
+
+            Your existing settings are preserved. \
+            You can uninstall anytime via right-click → Uninstall Hooks.
+            """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Install Hooks")
+        alert.addButton(withTitle: "Not Now")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            UserDefaults.standard.set(true, forKey: "hookConsentGiven")
+            return true
+        }
+        Logger.app.info("User skipped hook installation")
+        return false
     }
 
     func stop() {

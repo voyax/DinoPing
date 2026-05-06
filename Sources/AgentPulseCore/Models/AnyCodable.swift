@@ -42,10 +42,10 @@ public struct AnyCodable: Codable, Sendable, CustomStringConvertible {
             try container.encode(double)
         case let string as String:
             try container.encode(string)
-        case let array as [Any]:
-            try container.encode(array.map { AnyCodable($0 as! any Sendable) })
-        case let dict as [String: Any]:
-            try container.encode(dict.mapValues { AnyCodable($0 as! any Sendable) })
+        case let array as [any Sendable]:
+            try container.encode(array.map { AnyCodable($0) })
+        case let dict as [String: any Sendable]:
+            try container.encode(dict.mapValues { AnyCodable($0) })
         default:
             throw EncodingError.invalidValue(value, .init(codingPath: [], debugDescription: "Unsupported type"))
         }

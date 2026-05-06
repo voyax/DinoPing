@@ -28,5 +28,11 @@ let package = Package(
             name: "AgentPulseBridge",
             path: "Sources/AgentPulseBridge"
         ),
+
+        .testTarget(
+            name: "AgentPulseCoreTests",
+            dependencies: ["AgentPulseCore"],
+            path: "Tests/AgentPulseCoreTests"
+        ),
     ]
 )

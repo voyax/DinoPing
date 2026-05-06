@@ -22,6 +22,10 @@ public actor PermissionService {
     /// dict can't grow unboundedly.
     private static let backstopTimeoutSeconds: UInt64 = 86400
 
+    /// Number of continuations currently waiting. Exposed for tests so they
+    /// can poll until registration completes instead of using fragile sleeps.
+    public var pendingCount: Int { pending.count }
+
     public init() {}
 
     /// Block until the user makes a decision in the notch UI.
