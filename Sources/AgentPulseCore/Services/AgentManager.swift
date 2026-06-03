@@ -6,10 +6,6 @@ import os
 public final class AgentManager {
     public private(set) var sessions: [String: AgentSession] = [:]
     public var pendingPermissions: [PermissionRequest] = []
-    /// Per-permission bypass-confirm: the request ID that's currently armed
-    /// for bypass. Both keyboard (NotchPanel) and UI (PermissionBanner)
-    /// read/write this so the visual "Confirm?" is scoped to one banner.
-    public var bypassArmedId: String?
     /// Bulk confirm states — on AgentManager so NotchPanel can pause hover
     /// collapse while the user is mid-confirm on Allow All / Deny All.
     public var allowAllConfirm: Bool = false
@@ -151,12 +147,18 @@ public final class AgentManager {
         resolvePermission(id: id, decision: .allow)
     }
 
-    public func bypassPermission(id: String) {
-        resolvePermission(id: id, decision: .bypass)
-    }
-
-    public func denyPermission(id: String, reason: String = "Denied by user") {
-        resolvePermission(id: id, decision: .deny(reason: reason))
+    /// User-initiated deny entry point. Wraps the raw reason with
+    /// Claude Code's `REJECT_MESSAGE_WITH_REASON_PREFIX` (or
+    /// `REJECT_MESSAGE` when nil) so the UI renders a soft "Tool use
+    /// rejected" instead of a red "Error: ..." — see ClaudeCodeMessages
+    /// and docs/permissions.md.
+    ///
+    /// Internal/automatic denies (timeout, bridge disconnect, race
+    /// cleanup) go through `resolvePermissions` directly without this
+    /// wrapping — they're genuine errors and the red label is correct.
+    public func denyPermission(id: String, reason: String? = nil) {
+        let formatted = ClaudeCodeMessages.formattedRejection(reason: reason)
+        resolvePermission(id: id, decision: .deny(reason: formatted))
     }
 
     /// Single coordinator for the triple write. Safe to call multiple times

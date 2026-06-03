@@ -34,11 +34,6 @@ final class AgentPulsePanel: NSPanel {
         panel.applyDisplayPreference(nil)
     }
 
-    @objc func menuDeleteRule(_ sender: NSMenuItem) {
-        guard let idx = sender.representedObject as? Int else { return }
-        AllowRules.removeAt(index: idx)
-    }
-
     @objc func menuUninstallHooks(_ sender: NSMenuItem) {
         let alert = NSAlert()
         alert.messageText = "Uninstall AgentPulse hooks?"
@@ -108,7 +103,6 @@ final class NotchPanel {
     private var localRightClickMonitor: Any?
     private var localKeyMonitor: Any?
     private var lastMouseInSilhouette: Bool = false
-    private var bypassResetTask: Task<Void, Never>?
 
     init(agentManager: AgentManager) {
         self.agentManager = agentManager
@@ -173,6 +167,8 @@ final class NotchPanel {
         lastMouseInSilhouette = false
         panel?.ignoresMouseEvents = true
         panelState.displayState = .dormant
+        // No expanded panel = no need to keep polling transcripts.
+        agentManager.metadataService.stop()
         // Wait for the SwiftUI shrink animation to finish before fading the
         // OS window out, otherwise we'd see a sudden disappear.
         dormantTask = Task {
@@ -186,12 +182,16 @@ final class NotchPanel {
         cancelAllTasks()
         ensurePanelVisible()
         panelState.displayState = .compact
+        // Compact pill shows only summary text — no per-card data needed.
+        agentManager.metadataService.stop()
     }
 
     func transitionToExpanded() {
         cancelAllTasks()
         ensurePanelVisible()
         panelState.displayState = .expanded
+        // Cards are now visible — kick off the branch + usage polling.
+        agentManager.metadataService.start(agentManager: agentManager)
         makeKeyIfPermissions()
     }
 
@@ -232,9 +232,14 @@ final class NotchPanel {
     /// Maximum content size — derived from SilhouetteSizing so the panel
     /// window is always large enough to hold the biggest silhouette plus
     /// shadow room. Anything outside the visible silhouette is click-through.
+    ///
+    /// Width buffer is tuned to *just* fit the shadow (radius 18 each side):
+    /// `expandedWidth + 36` gives ~18pt of clear space on each side. The old
+    /// `+ 80` value left 40pt gaps that revealed background windows ("bleed-
+    /// through") next to the cards — visually distracting and ugly.
     private static let panelMaxSize = NSSize(
-        width: SilhouetteSizing.expandedWidth + 80,   // 410 + shadow
-        height: SilhouetteSizing.expandedMaxHeight + 40  // 380 + shadow
+        width: SilhouetteSizing.expandedWidth + 36,   // 410 + ~18pt each side for shadow
+        height: SilhouetteSizing.expandedMaxHeight + 40
     )
 
     private func createPanel() {
@@ -302,9 +307,15 @@ final class NotchPanel {
             sessionCount: agentManager.activeSessions.count,
             permissionCount: agentManager.pendingPermissions.count
         )
+        // NotchShape extends `shoulder` pixels past the body on each side
+        // (the concave curves into the menu bar). Include that overhang
+        // in the interactive rect — otherwise the visible shoulders are
+        // click-through and hovering onto them collapses the panel.
+        let shoulder = SilhouetteSizing.shoulder(state: panelState.displayState, hasNotch: panelState.hasNotch)
+        let fullWidth = size.width + 2 * shoulder
 
         let bounds = CGRect(origin: .zero, size: panel.frame.size)
-        let clampedW = min(size.width, bounds.width)
+        let clampedW = min(fullWidth, bounds.width)
         let clampedH = min(size.height, bounds.height)
         let originX = max(0, (bounds.width - clampedW) / 2)
         // Panel coords are bottom-left origin → "top of the panel" = maxY.
@@ -433,8 +444,11 @@ final class NotchPanel {
         }
     }
 
-    /// Handle ^Y (allow), ^N (deny), ^A (always allow), ^B (bypass) for
-    /// the first pending permission. Returns true if the event was consumed.
+    /// Handle ^Y (allow), ^N (deny), ^A (always allow) for the first
+    /// pending permission. Returns true if the event was consumed.
+    /// `^A` writes an "Always" rule via the agent's `permissionStrategy`
+    /// then approves — for agents with `.notSupported`, ^A falls back
+    /// to a plain Allow.
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard panelState.displayState == .expanded else { return false }
         guard !agentManager.pendingPermissions.isEmpty else { return false }
@@ -449,24 +463,15 @@ final class NotchPanel {
             agentManager.denyPermission(id: perm.id)
             return true
         case "a":
-            let input = perm.toolInput.mapValues { $0.value }
-            let pattern = AllowRules.primaryArg(toolName: perm.toolName, input: input)
-            AllowRules.add(.init(toolName: perm.toolName, pattern: pattern))
-            agentManager.approvePermission(id: perm.id)
-            return true
-        case "b":
-            if agentManager.bypassArmedId == perm.id {
-                agentManager.bypassArmedId = nil
-                bypassResetTask?.cancel()
-                agentManager.bypassPermission(id: perm.id)
-            } else {
-                agentManager.bypassArmedId = perm.id
-                bypassResetTask?.cancel()
-                bypassResetTask = Task {
-                    try? await Task.sleep(for: .seconds(5))
-                    self.agentManager.bypassArmedId = nil
-                }
+            // Find the originating session's agentKind so we know how
+            // to persist the rule. Fall back to a plain Allow if the
+            // session is missing or the strategy is .notSupported.
+            let agentKind = agentManager.sessions[perm.sessionId]?.agentKind
+            if case .native(let writer) = agentKind?.permissionStrategy {
+                let input = perm.toolInput.mapValues { $0.value }
+                try? writer.writeAllowRule(toolName: perm.toolName, toolInput: input, cwd: perm.cwd)
             }
+            agentManager.approvePermission(id: perm.id)
             return true
         default:
             return false
@@ -543,31 +548,37 @@ final class NotchPanel {
             sessionCount: agentManager.activeSessions.count,
             permissionCount: agentManager.pendingPermissions.count
         )
+        let shoulder = SilhouetteSizing.shoulder(state: state, hasNotch: panelState.hasNotch)
 
-        // Silhouette rect in NSScreen coords (bottom-left origin). The
-        // silhouette sits at the very top of the panel, horizontally centered.
+        // Silhouette rect in NSScreen coords (bottom-left origin). `silScreenX`
+        // remains at the body's left edge so that `localX` matches the
+        // NotchShape path's coordinate system, where `local.x = -shoulder`
+        // is the left shoulder tip. The rect rejection below expands by
+        // `shoulder` on each side to cover the visible overhang.
         let silScreenX = panelFrame.midX - size.width / 2
         let silTopScreenY = panelFrame.maxY            // NSScreen top of panel
         let silBottomScreenY = silTopScreenY - size.height
 
-        // Cheap rect rejection first.
-        guard mouseScreenPoint.x >= silScreenX,
-              mouseScreenPoint.x <= silScreenX + size.width,
+        // Cheap rect rejection — full width includes the concave shoulder
+        // overhang. Without this the visible 8–10pt shoulders are dead
+        // zones that pass clicks through to the app underneath.
+        guard mouseScreenPoint.x >= silScreenX - shoulder,
+              mouseScreenPoint.x <= silScreenX + size.width + shoulder,
               mouseScreenPoint.y >= silBottomScreenY,
               mouseScreenPoint.y <= silTopScreenY else {
             return false
         }
 
         // Inside the bounding rect → now check the actual NotchShape path.
-        // The path is defined in a top-left coordinate space the same width/
-        // height as `size`, so we flip y to convert from NSScreen → local.
+        // The path uses local coords where the body is `[0, size.width]`
+        // and shoulders extend to `-shoulder` / `size.width + shoulder`.
+        // We flip y to convert from NSScreen → local.
         let localX = mouseScreenPoint.x - silScreenX
         let localY = silTopScreenY - mouseScreenPoint.y
 
-        let topR = SilhouetteSizing.topRadius(state: state, hasNotch: panelState.hasNotch)
         let botR = SilhouetteSizing.bottomRadius(state: state, hasNotch: panelState.hasNotch)
         let localRect = CGRect(origin: .zero, size: size)
-        let path = NotchShape(topRadius: topR, bottomRadius: botR)
+        let path = NotchShape(bottomRadius: botR, shoulder: shoulder)
             .path(in: localRect)
             .cgPath
         return path.contains(CGPoint(x: localX, y: localY))
@@ -603,8 +614,7 @@ final class NotchPanel {
         } else if state == .expanded {
             // Don't collapse while the user is mid-confirm on a destructive
             // action — they need the panel to stay visible.
-            if agentManager.bypassArmedId != nil
-                || agentManager.allowAllConfirm
+            if agentManager.allowAllConfirm
                 || agentManager.denyAllConfirm { return }
             let delay: TimeInterval = agentManager.hasPendingPermissions ? 0.6 : 0.2
             scheduleCollapse(delay: delay)
@@ -660,25 +670,11 @@ final class NotchPanel {
             menu.addItem(item)
         }
 
-        // Allow Rules
-        let rules = AllowRules.load()
-        if !rules.isEmpty {
-            menu.addItem(.separator())
-            let rulesHeader = NSMenuItem(title: "Allow Rules", action: nil, keyEquivalent: "")
-            rulesHeader.isEnabled = false
-            menu.addItem(rulesHeader)
-            for (idx, rule) in rules.enumerated() {
-                let desc = "\(rule.toolName): \(rule.pattern ?? "*")"
-                let item = NSMenuItem(
-                    title: desc,
-                    action: #selector(AgentPulsePanel.menuDeleteRule(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = panel
-                item.representedObject = idx  // index into the rules array
-                menu.addItem(item)
-            }
-        }
+        // Rules-management menu removed in May 2026 redesign. Allow
+        // rules now live in each agent's own config file (e.g.
+        // `.claude/settings.local.json`) — manage them via the agent's
+        // native UI (Claude's `/permissions`, Codex's TUI rules editor,
+        // etc.). See docs/permissions.md > "Drop the rules-management menu".
 
         // Uninstall + Quit
         menu.addItem(.separator())
@@ -714,8 +710,6 @@ final class NotchPanel {
         hoverTask?.cancel()
         collapseTask?.cancel()
         dormantTask?.cancel()
-        bypassResetTask?.cancel()
-        agentManager.bypassArmedId = nil
         agentManager.allowAllConfirm = false
         agentManager.denyAllConfirm = false
     }

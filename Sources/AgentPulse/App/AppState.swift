@@ -104,10 +104,10 @@ final class AppState {
                     return .allow(hookEvent: "PermissionRequest")
                 }
 
-                // Check "Always Allow" rules first — auto-approve without UI.
-                if AllowRules.isAllowed(toolName: toolName, toolInput: toolInput) {
-                    return .allow(hookEvent: "PermissionRequest")
-                }
+                // No "Always Allow" gate here — `AgentKind.permissionStrategy.native`
+                // writes rules to the agent's own config (e.g. Claude's
+                // settings.local.json), so the agent auto-approves matching
+                // requests before the hook fires. See docs/permissions.md.
 
                 // Fresh UUID for the request id; toolUseId is recorded
                 // separately on PermissionRequest so cleanup paths can match
@@ -140,7 +140,6 @@ final class AppState {
 
                 switch decision {
                 case .allow: return .allow(hookEvent: "PermissionRequest")
-                case .bypass: return .allow(hookEvent: "PermissionRequest")
                 case .deny(let reason): return .deny(hookEvent: "PermissionRequest", reason: reason)
                 }
             }

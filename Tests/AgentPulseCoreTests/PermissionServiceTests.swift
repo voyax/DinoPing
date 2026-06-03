@@ -60,11 +60,4 @@ struct PermissionServiceTests {
         if case .deny = await t2.value {} else { Issue.record("d2 should be deny") }
     }
 
-    @Test func bypassDecision() async {
-        let svc = PermissionService()
-        let task = Task { await svc.awaitDecision(for: "b1") }
-        await waitForPending(svc, count: 1)
-        await svc.resolve(requestId: "b1", decision: .bypass)
-        #expect(await task.value == .bypass)
-    }
 }
