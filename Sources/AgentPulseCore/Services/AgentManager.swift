@@ -11,6 +11,11 @@ public final class AgentManager {
     public var allowAllConfirm: Bool = false
     public var denyAllConfirm: Bool = false
     public let permissionService = PermissionService()
+    /// Polls all active sessions for branch + token/cost data and writes
+    /// the results back into each `AgentSession`. NotchPanel toggles
+    /// `start()` / `stop()` based on whether the panel is expanded so we
+    /// don't scan transcripts when nothing is on-screen to read them.
+    public let metadataService = SessionMetadataService()
     private let transcriptReader = TranscriptReader()
     private var discoveryTask: Task<Void, Never>?
     private var refreshDebounceTask: Task<Void, Never>?
@@ -25,13 +30,22 @@ public final class AgentManager {
             let reader = self.transcriptReader
             let discovered = await Task.detached {
                 let sessions = SessionDiscovery().discoverClaudeCodeSessions()
-                // Pre-load latest user prompts off the main actor
-                return sessions.map { info -> (SessionDiscovery.DiscoveredSession, String?) in
-                    (info, reader.latestUserPrompt(cwd: info.cwd, sessionId: info.sessionId))
+                // Pre-load prompt + assistant reply + transcript mtime off
+                // the main actor so cold-started idle sessions render the
+                // action line AND the correct elapsed time on first frame
+                // — without this, every card shows "just now" because
+                // both `lastActiveTime` and `lastEventTime` default to .now.
+                return sessions.map { info -> (SessionDiscovery.DiscoveredSession, String?, String?, Date?) in
+                    (
+                        info,
+                        reader.latestUserPrompt(cwd: info.cwd, sessionId: info.sessionId),
+                        reader.latestAssistantMessage(cwd: info.cwd, sessionId: info.sessionId),
+                        reader.transcriptModificationDate(cwd: info.cwd, sessionId: info.sessionId)
+                    )
                 }
             }.value
             var seenCwds = Set<String>()
-            for (info, prompt) in discovered {
+            for (info, prompt, reply, mtime) in discovered {
                 guard !seenCwds.contains(info.cwd) else { continue }
                 seenCwds.insert(info.cwd)
                 let session = AgentSession(id: info.sessionId, agentKind: info.agentKind, cwd: info.cwd)
@@ -40,7 +54,18 @@ public final class AgentManager {
                 session.status = .waitingForInput
                 session.pid = info.pid
                 session.lastUserPrompt = prompt
+                session.lastAssistantMessage = reply
+                if let mtime {
+                    session.lastActiveTime = mtime
+                    // Seed `lastEventTime` too so the activeSessions sort
+                    // (by most-recent-event) orders cold-started sessions
+                    // by real recency instead of leaving them all tied at
+                    // discovery time.
+                    session.lastEventTime = mtime
+                }
                 self.sessions[info.sessionId] = session
+                self.metadataService.resolveBranch(for: session)
+                self.metadataService.resolveHost(for: session)
             }
             if !discovered.isEmpty {
                 Logger.agentManager.info("Discovered \(discovered.count, privacy: .public) existing sessions")
@@ -214,6 +239,10 @@ public final class AgentManager {
         if let url = transcriptReader.transcriptURL(cwd: cwd, sessionId: id) {
             transcriptWatcher?.watch(path: url.path)
         }
+        // Fire-and-forget branch + host lookups — populate session.branch
+        // and session.host asynchronously without blocking the hook flow.
+        metadataService.resolveBranch(for: session)
+        metadataService.resolveHost(for: session)
         return session
     }
 
@@ -371,12 +400,17 @@ public final class AgentManager {
             let reader = self.transcriptReader
             let discovered = await Task.detached {
                 let sessions = SessionDiscovery().discoverClaudeCodeSessions()
-                return sessions.map { info -> (SessionDiscovery.DiscoveredSession, String?) in
-                    (info, reader.latestUserPrompt(cwd: info.cwd, sessionId: info.sessionId))
+                return sessions.map { info -> (SessionDiscovery.DiscoveredSession, String?, String?, Date?) in
+                    (
+                        info,
+                        reader.latestUserPrompt(cwd: info.cwd, sessionId: info.sessionId),
+                        reader.latestAssistantMessage(cwd: info.cwd, sessionId: info.sessionId),
+                        reader.transcriptModificationDate(cwd: info.cwd, sessionId: info.sessionId)
+                    )
                 }
             }.value
             let existingCwds = Set(sessions.values.map(\.cwd))
-            for (info, prompt) in discovered {
+            for (info, prompt, reply, mtime) in discovered {
                 // Already tracked? Backfill a pid if it's still missing
                 // (hook-created sessions arrive without one), then move on.
                 // This is the catch-all behind the creation-time backfill.
@@ -408,7 +442,14 @@ public final class AgentManager {
                 session.status = .waitingForInput  // initialization, not transition
                 session.pid = info.pid
                 session.lastUserPrompt = prompt
+                session.lastAssistantMessage = reply
+                if let mtime {
+                    session.lastActiveTime = mtime
+                    session.lastEventTime = mtime
+                }
                 sessions[info.sessionId] = session
+                metadataService.resolveBranch(for: session)
+                metadataService.resolveHost(for: session)
             }
         }
     }

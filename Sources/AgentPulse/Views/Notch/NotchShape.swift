@@ -1,33 +1,90 @@
 import SwiftUI
 
-/// Notch-matching shape: concave top corners (match physical notch) + convex bottom corners.
+/// macOS "Dynamic-Island-on-Mac" silhouette: a rounded body whose top
+/// corners curve CONCAVELY *outward* past the frame, so the silhouette
+/// appears to flow seamlessly into the menu bar.
+///
+/// Geometry (the body is `rect`; shoulders extend `shoulder` pixels past
+/// the frame on each side):
+/// ```
+///     menu bar (y = 0)
+///     ────────╮          ╭────────
+///             ╲          ╱
+///              ╲        ╱           ← concave shoulders curve outward
+///   x = -s →   ▓▓▓▓▓▓▓▓▓▓   ← x = w+s
+///              ▓ body  ▓
+///              ▓▓▓▓▓▓▓▓
+///                ╲___╱            ← bottom convex corners
+/// ```
+///
+/// Because the path extends past the frame, place the shape inside a
+/// container that does NOT clip (no `.clipShape` on the parent). When
+/// you DO want to clip content to this silhouette, the clipShape itself
+/// uses the same path — the overhang is intentional and consistent on
+/// both sides.
+///
+/// - `bottomRadius` controls the bottom-corner roundness (12 compact pill,
+///   22 expanded card).
+/// - `shoulder` controls how far the concave curves protrude past the
+///   body sides (8 compact pill, 10 expanded card).
 struct NotchShape: Shape, Animatable {
-    var topRadius: CGFloat
     var bottomRadius: CGFloat
+    var shoulder: CGFloat
 
     var animatableData: AnimatablePair<CGFloat, CGFloat> {
-        get { .init(topRadius, bottomRadius) }
-        set { topRadius = newValue.first; bottomRadius = newValue.second }
+        get { .init(bottomRadius, shoulder) }
+        set { bottomRadius = newValue.first; shoulder = newValue.second }
     }
 
-    static let closed = NotchShape(topRadius: 6, bottomRadius: 20)
-    static let opened = NotchShape(topRadius: 22, bottomRadius: 36)
-    static let pill = NotchShape(topRadius: 12, bottomRadius: 12) // non-notch floating
-
     func path(in rect: CGRect) -> Path {
-        let w = rect.width, h = rect.height
-        let tr = min(topRadius, w / 4, h / 4)
-        let br = min(bottomRadius, w / 4, h / 4)
+        let w = rect.width
+        let h = rect.height
+        let s = shoulder
+        let r = min(bottomRadius, w / 2, h - s)
 
         var p = Path()
-        p.move(to: .init(x: 0, y: 0))
-        p.addQuadCurve(to: .init(x: tr, y: tr), control: .init(x: tr, y: 0))
-        p.addLine(to: .init(x: tr, y: h - br))
-        p.addQuadCurve(to: .init(x: tr + br, y: h), control: .init(x: tr, y: h))
-        p.addLine(to: .init(x: w - tr - br, y: h))
-        p.addQuadCurve(to: .init(x: w - tr, y: h - br), control: .init(x: w - tr, y: h))
-        p.addLine(to: .init(x: w - tr, y: tr))
-        p.addQuadCurve(to: .init(x: w, y: 0), control: .init(x: w - tr, y: 0))
+
+        // Start at the LEFT shoulder tip — outside the frame at x = -s.
+        // This point lies flat against the menu bar (y = 0).
+        p.move(to: CGPoint(x: -s, y: 0))
+
+        // Top-left concave shoulder: curve inward and downward to (0, s).
+        // Control point at (0, 0) pulls the curve tight to the corner.
+        p.addQuadCurve(
+            to: CGPoint(x: 0, y: s),
+            control: CGPoint(x: 0, y: 0)
+        )
+
+        // Left side: straight down to where bottom-left rounding begins.
+        p.addLine(to: CGPoint(x: 0, y: h - r))
+
+        // Bottom-left convex corner.
+        p.addQuadCurve(
+            to: CGPoint(x: r, y: h),
+            control: CGPoint(x: 0, y: h)
+        )
+
+        // Bottom edge.
+        p.addLine(to: CGPoint(x: w - r, y: h))
+
+        // Bottom-right convex corner.
+        p.addQuadCurve(
+            to: CGPoint(x: w, y: h - r),
+            control: CGPoint(x: w, y: h)
+        )
+
+        // Right side: straight up to where top concave shoulder starts.
+        p.addLine(to: CGPoint(x: w, y: s))
+
+        // Top-right concave shoulder: curve outward and upward to (w+s, 0).
+        p.addQuadCurve(
+            to: CGPoint(x: w + s, y: 0),
+            control: CGPoint(x: w, y: 0)
+        )
+
+        // Close: SwiftUI draws a straight line from (w+s, 0) back to
+        // (-s, 0). This horizontal segment is the top edge that sits flat
+        // against the menu bar.
         p.closeSubpath()
         return p
     }

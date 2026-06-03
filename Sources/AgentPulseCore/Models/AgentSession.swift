@@ -33,6 +33,19 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
     private static let maxRecentTools = 5
     /// Derived from the transcript file's mtime.
     public var lastActiveTime: Date?
+    /// Git branch resolved for `cwd` (via `GitBranch.refresh`). nil until
+    /// the resolver has had a chance to run, or when the cwd isn't a git
+    /// repo / is in detached HEAD state. Populated by `AgentManager` once
+    /// per session, lazily refreshed by `SessionMetadataService`.
+    public var branch: String?
+    /// Token + cost aggregate, read from the session's transcript JSONL.
+    /// Refreshed periodically by `SessionMetadataService` while the panel
+    /// is expanded; nil before the first scan.
+    public var usage: SessionUsage?
+    /// Terminal / editor application that launched the agent, resolved
+    /// once at session creation by walking the parent-process chain.
+    /// `nil` when detection failed (unknown app, dead PID, missing pid).
+    public var host: HostKind?
 
     public enum SessionStatus: Sendable {
         case active

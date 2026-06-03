@@ -11,10 +11,16 @@ struct NotchContentView: View {
     private var isCompact: Bool { displayState == .compact }
 
     // MARK: - Animation curves
+    //
+    // Design spec: `apIslandExpand .32s cubic-bezier(.34, 1.5, .55, 1)` —
+    // a slight overshoot spring. SwiftUI's `.spring(response: 0.32,
+    // dampingFraction: 0.6)` approximates that bezier curve. Close (1→2)
+    // and compact↔compact conversions use a tighter, non-bouncy easing
+    // so they don't feel "wobbly" when nothing dramatic is happening.
 
-    private static let openAnimation: Animation = .spring(response: 0.42, dampingFraction: 0.78)
-    private static let closeAnimation: Animation = .smooth(duration: 0.32)
-    private static let conversionAnimation: Animation = .spring(response: 0.4, dampingFraction: 0.84)
+    private static let openAnimation: Animation = .spring(response: 0.32, dampingFraction: 0.6)
+    private static let closeAnimation: Animation = .smooth(duration: 0.28)
+    private static let conversionAnimation: Animation = .spring(response: 0.34, dampingFraction: 0.78)
 
     private var transitionAnimation: Animation {
         switch displayState {
@@ -26,8 +32,8 @@ struct NotchContentView: View {
 
     // MARK: - Animatable shape parameters (single source: SilhouetteSizing)
 
-    private var topRadius: CGFloat {
-        SilhouetteSizing.topRadius(state: displayState, hasNotch: hasNotch)
+    private var shoulder: CGFloat {
+        SilhouetteSizing.shoulder(state: displayState, hasNotch: hasNotch)
     }
 
     private var bottomRadius: CGFloat {
@@ -46,14 +52,47 @@ struct NotchContentView: View {
     // silhouette stuck at the old (larger) size for the duration of the
     // collapse animation — the "ghost frame" the user reported.
 
+    /// Number of sessions awaiting user response (permission or question).
+    /// Drives the ACTION-state visual upgrades on the silhouette.
+    private var waitingCount: Int {
+        agentManager.activeSessions.filter {
+            $0.pendingPermission != nil || $0.pendingQuestion != nil
+        }.count
+    }
+
+    private var isActionState: Bool { waitingCount > 0 }
+
     var body: some View {
         ZStack(alignment: .top) {
-            // The visible black silhouette
-            NotchShape(topRadius: topRadius, bottomRadius: bottomRadius)
-                .fill(Color.black)
+            // ACTION halo — accent-colored duplicate of the silhouette,
+            // sitting BEHIND the main fill with a blur so it reads as a
+            // soft warm glow around the pill / card. Toggled on whenever
+            // any session needs the user.
+            if isActionState {
+                NotchShape(bottomRadius: bottomRadius, shoulder: shoulder)
+                    .fill(Color.ap.accentDefault)
+                    .opacity(isExpanded ? 0.32 : 0.55)
+                    .blur(radius: isExpanded ? 4 : 3)
+                    .allowsHitTesting(false)
+            }
 
-            // Content overlaid on top, clipped to the exact same shape so it
-            // can never spill outside the curve while transitioning.
+            // Silhouette body fill. Compact/dormant pill is pure black —
+            // it sits against a screen-black notch and must read as one
+            // continuous shape. The expanded card gets a subtle vertical
+            // gradient so it doesn't look flat at 380pt tall.
+            NotchShape(bottomRadius: bottomRadius, shoulder: shoulder)
+                .fill(silhouetteFill)
+
+            // Silhouette stroke. White hairline normally; accent in ACTION
+            // so the entire panel reads warm-orange-edged.
+            NotchShape(bottomRadius: bottomRadius, shoulder: shoulder)
+                .stroke(
+                    isActionState ? Color.ap.accentDefault.opacity(0.6) : Color.ap.stroke,
+                    lineWidth: 0.5
+                )
+
+            // Content — clipped to the exact same shape so it can never
+            // spill outside the curve while transitioning.
             Group {
                 if isCompact {
                     compactView
@@ -64,35 +103,48 @@ struct NotchContentView: View {
                 }
             }
             .frame(width: silhouetteWidth, height: silhouetteHeight, alignment: .top)
-            .clipShape(NotchShape(topRadius: topRadius, bottomRadius: bottomRadius))
+            .clipShape(NotchShape(bottomRadius: bottomRadius, shoulder: shoulder))
         }
-        // Constrain to silhouette size FIRST so the tap gesture and shape
-        // hit-test below operate on the small visible region, not the whole
-        // 540×420 panel canvas.
         .frame(width: silhouetteWidth, height: silhouetteHeight)
-        .contentShape(NotchShape(topRadius: topRadius, bottomRadius: bottomRadius))
-        // NOTE: no `.onTapGesture` here — it used to call handleTap() to
-        // toggle compact↔expanded, but it also intercepted clicks on child
-        // Buttons (like the ↗ terminal-jump button) and prevented them from
-        // firing. Collapse is handled by hover-out via the NSEvent monitor.
+        .contentShape(NotchShape(bottomRadius: bottomRadius, shoulder: shoulder))
+        // NOTE: no `.onTapGesture` / `.onHover` — hover detection happens
+        // at the NSEvent level in `NotchPanel`. See its comments for why.
         //
-        // NOTE: no `.onHover` here. Hover detection lives entirely in
-        // `NotchPanel.updateMouseState` (NSEvent monitor). Adding SwiftUI
-        // `.onHover` on this view used to compete with the NSEvent path —
-        // its content shape was the *outer* frame below, so the cursor
-        // anywhere in the 540×420 panel area was reported as "hovering"
-        // and the expand→collapse cycle never settled.
+        // Drop shadow — exactly per spec:
+        //   expanded: drop-shadow(0 24px 40px rgba(0,0,0,.55))
+        //           + drop-shadow(0 2px 6px rgba(0,0,0,.4))
+        //   compact:  no shadow (the pill sits flush against the menu bar)
         .shadow(
-            color: .black.opacity(isExpanded ? 0.45 : 0.25),
-            radius: isExpanded ? 18 : 6,
-            y: isExpanded ? 8 : 2
+            color: isExpanded ? .black.opacity(0.55) : .clear,
+            radius: isExpanded ? 40 : 0,
+            x: 0,
+            y: isExpanded ? 24 : 0
+        )
+        .shadow(
+            color: isExpanded ? .black.opacity(0.40) : .clear,
+            radius: isExpanded ? 6 : 0,
+            x: 0,
+            y: isExpanded ? 2 : 0
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(transitionAnimation, value: displayState)
-        // The silhouette also has to animate when content count changes,
-        // otherwise a new card "snaps" into the silhouette without easing.
         .animation(.smooth(duration: 0.28), value: agentManager.activeSessions.count)
         .animation(.smooth(duration: 0.28), value: agentManager.pendingPermissions.count)
+    }
+
+    /// Body fill for the silhouette. Compact / dormant pill is pure black;
+    /// expanded card gets the design's subtle vertical gradient.
+    private var silhouetteFill: AnyShapeStyle {
+        if isExpanded {
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [Color.ap.bgCardTop, Color.ap.bgCardBottom],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+        return AnyShapeStyle(Color.ap.bgPill)
     }
 
     /// Single source of truth for the visible silhouette size — both this
@@ -118,19 +170,111 @@ struct NotchContentView: View {
     @ViewBuilder
     private var compactView: some View {
         let sessions = agentManager.activeSessions
-        let permCount = agentManager.pendingPermissions.count
+        let waiting = waitingSessionCount(sessions)
+        let primary = sortedSessions.first
+        let summary = pillSummary(sessions: sessions, waiting: waiting)
 
-        HStack(spacing: 7) {
-            Circle()
-                .fill(compactStatusColor(sessions: sessions, permCount: permCount))
-                .frame(width: 6, height: 6)
+        HStack(spacing: 8) {
+            // Centered content — Spacers on both sides distribute slack
+            // equally instead of pinning the chevron to the far right
+            // edge, which made the pill look left-heavy.
+            Spacer(minLength: 0)
 
-            Text(compactText(sessions: sessions, permCount: permCount))
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.92))
+            // Chrome pixel dino. pixelSize 0.75 = ~16pt tall, ~57% of
+            // the visible notch interior. pixelSize 1 (21pt, 75%) looked
+            // vertically maxed-out per user feedback. Sub-1 pixelSize
+            // means ~1.5 device pixels per sprite pixel on Retina —
+            // slight edge antialias, but a chunky pixel-art silhouette
+            // tolerates it without visible blur.
+            if let primary {
+                DinoView(
+                    species: .rex,
+                    state: DinoState.from(primary),
+                    pixelSize: 0.75
+                )
+            } else {
+                Circle()
+                    .fill(Color.white.opacity(0.4))
+                    .frame(width: 6, height: 6)
+            }
+
+            // Status text — color matches the dominant state
+            Text(summary.text)
+                .font(.system(size: 11.5, weight: .medium))
+                .tracking(-0.1)
+                .monospacedDigit()
+                .foregroundStyle(summary.color)
+
+            // Waiting indicator — pulsing dot only when something needs us
+            if waiting > 0 {
+                // Faster pulse on the pill (1.2s) — design uses this on
+                // the urgent waiting indicator to push for action.
+                PulsingDot(color: .ap.statusWaiting, size: 6, duration: 1.2)
+            }
+
+            // Chevron hint: ⌄ collapsed → ⌃ expanded.
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.35))
+
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .padding(.leading, 12)
+        .padding(.trailing, 14)
+        .frame(maxHeight: .infinity)
+    }
+
+    /// `(text, color)` for the compact pill's status line. Colour tracks
+    /// the most-urgent state; text always surfaces the total session
+    /// count so a glance answers BOTH "is anything urgent?" and "how
+    /// many agents am I juggling?".
+    ///
+    /// Examples:
+    /// - 0 sessions             → "no agents"
+    /// - All 5 working          → "5 working"           (no ratio when same state)
+    /// - 1 waiting, 4 working   → "1 of 5 waiting"
+    /// - 3 working of 5         → "3 of 5 working"
+    /// - All 5 truly done       → "all done"
+    /// - 5 idle (waitingForInput) → "5 idle"
+    private func pillSummary(sessions: [AgentSession], waiting: Int) -> (text: String, color: Color) {
+        let total = sessions.count
+        if total == 0 {
+            return ("no agents", .white.opacity(0.5))
+        }
+        let errors = sessions.filter { $0.status == .stopped }.count
+        let working = sessions.filter { $0.status == .active }.count
+        let trulyDone = sessions.filter { $0.status == .done }.count
+
+        // Helper: "N of M state" when N < M, "M state" when N == M.
+        func phrase(_ count: Int, _ word: String) -> String {
+            count == total ? "\(total) \(word)" : "\(count) of \(total) \(word)"
+        }
+
+        if waiting > 0 {
+            return (phrase(waiting, "waiting"), .ap.textOrange)
+        }
+        if errors > 0 {
+            return (phrase(errors, "error"), .ap.textRed)
+        }
+        if working > 0 {
+            return (phrase(working, "working"), .ap.textTeal)
+        }
+        // Reserve "all done" for sessions truly in .done state. Most
+        // post-turn sessions sit in .waitingForInput (agent finished its
+        // turn, awaiting the next user message) — those are "idle", not
+        // "done", and calling them done would imply the session ended.
+        if trulyDone == total {
+            return (total == 1 ? "1 done" : "all done", .ap.statusDone)
+        }
+        // 0.75 white reads as "muted but legible" on the black notch;
+        // anything lower (0.55, the previous value) blends into the
+        // background and forces the user to lean in.
+        return (total == 1 ? "1 idle" : "\(total) idle", .white.opacity(0.75))
+    }
+
+    /// Sessions that need the user RIGHT NOW (permission + question).
+    private func waitingSessionCount(_ sessions: [AgentSession]) -> Int {
+        sessions.filter { $0.pendingPermission != nil || $0.pendingQuestion != nil }.count
     }
 
     // MARK: - Expanded (cards)
@@ -156,19 +300,23 @@ struct NotchContentView: View {
         // doesn't get cropped by the curve.
         let topInset: CGFloat = hasNotch ? panelState.notchHeight + 4 : 8
 
-        if sessions.isEmpty && permissions.isEmpty {
-            VStack(spacing: 10) {
-                Image(systemName: "waveform.path.ecg")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white.opacity(0.3))
-                Text("No active agents")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.top, topInset)
-            .padding(.bottom, 12)
-        } else {
+        VStack(spacing: 0) {
+            // Top space to clear the notch silhouette overhang.
+            Color.clear.frame(height: topInset)
+            // Sticky header with brand + session count.
+            panelHeader(sessionCount: sessions.count)
+
+            if sessions.isEmpty && permissions.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white.opacity(0.3))
+                    Text("No active agents")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
             // ScrollView so >5 cards stay reachable instead of being clipped
             // by the silhouette's max height.
             ScrollView(.vertical, showsIndicators: false) {
@@ -238,10 +386,11 @@ struct NotchContentView: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.top, topInset + 6)
+                .padding(.top, 6)
                 .padding(.bottom, 12)
             }
             .frame(width: 380)
+            .frame(maxHeight: .infinity)
             // Don't bounce off the top edge — that visually fights the notch
             // curve and feels wrong.
             .scrollBounceBehavior(.basedOnSize)
@@ -272,6 +421,79 @@ struct NotchContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: toastMessage)
+            }   // closes `else` (populated branch)
+
+            // Footer — keyboard hint + Settings link. Stays anchored to
+            // the bottom of the silhouette regardless of session count.
+            panelFooter
+        }   // closes outer VStack(spacing: 0)
+    }
+
+    // MARK: - Panel header / footer
+
+    @ViewBuilder
+    private func panelHeader(sessionCount: Int) -> some View {
+        HStack(spacing: 8) {
+            Text("AgentPulse")
+                .font(.system(size: 12, weight: .semibold))
+                .tracking(-0.1)
+                .foregroundStyle(Color.ap.fg)
+
+            Text("\(sessionCount) " + (sessionCount == 1 ? "session" : "sessions"))
+                .font(.system(size: 10.5))
+                .foregroundStyle(Color.ap.fgDim)
+                .monospacedDigit()
+
+            Spacer(minLength: 4)
+
+            // Right-click on the silhouette already exposes the Display
+            // picker + Uninstall menu (see NotchPanel.swift). Surface
+            // that as a hint so users know it exists.
+            Image(systemName: "ellipsis")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.ap.fgDim)
+                .help("Right-click the notch for display, allow-rules, and uninstall options")
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.ap.divider)
+                .frame(height: 0.5)
+        }
+    }
+
+    @ViewBuilder
+    private var panelFooter: some View {
+        HStack(spacing: 8) {
+            Text("⌥⌘P")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .padding(.horizontal, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                )
+            Text("toggle")
+                .foregroundStyle(Color.ap.fgDim)
+
+            Spacer(minLength: 4)
+
+            Text("Settings")
+                .foregroundStyle(Color.ap.fgDim)
+            Image(systemName: "gearshape")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.ap.fgDim)
+        }
+        .font(.system(size: 10))
+        .padding(.horizontal, 12)
+        .padding(.top, 7)
+        .padding(.bottom, 7)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.ap.divider)
+                .frame(height: 0.5)
         }
     }
 
@@ -291,7 +513,15 @@ struct NotchContentView: View {
 
     private var sortedSessions: [AgentSession] {
         agentManager.activeSessions.sorted { a, b in
-            sortPriority(a) < sortPriority(b)
+            let pa = sortPriority(a)
+            let pb = sortPriority(b)
+            // Tie-break by recency so cold-started sessions (all sharing
+            // `.waitingForInput`) order by transcript mtime instead of
+            // landing in arbitrary order — Swift's `sorted(by:)` is not
+            // stable, so without this `primary = first` was picking
+            // whichever session the sort happened to land on.
+            if pa != pb { return pa < pb }
+            return a.lastEventTime > b.lastEventTime
         }
     }
 
@@ -306,37 +536,6 @@ struct NotchContentView: View {
         }
     }
 
-    private func compactStatusColor(sessions: [AgentSession], permCount: Int) -> Color {
-        if permCount > 0 { return .orange }
-        if sessions.contains(where: { $0.pendingQuestion != nil }) {
-            return QuestionBanner.accent
-        }
-        if sessions.contains(where: { $0.status == .active }) { return .green }
-        return .white.opacity(0.4)
-    }
-
-    private func compactText(sessions: [AgentSession], permCount: Int) -> String {
-        let questionCount = sessions.filter { $0.pendingQuestion != nil }.count
-
-        // Permissions are the most urgent — surface first.
-        if permCount > 0 && questionCount > 0 {
-            return "\(permCount) approval, \(questionCount) question"
-        }
-        if permCount > 0 {
-            return permCount == 1 ? "1 needs approval" : "\(permCount) need approval"
-        }
-        // Questions = "Claude is waiting on your answer in terminal"
-        if questionCount > 0 {
-            return questionCount == 1 ? "1 question" : "\(questionCount) questions"
-        }
-
-        if sessions.isEmpty { return "No agents" }
-        let total = sessions.count
-        let active = sessions.filter { $0.status == .active }.count
-        if active > 0 && active < total { return "\(active)/\(total) active" }
-        if active == total { return total == 1 ? "1 working" : "\(total) working" }
-        return total == 1 ? "1 idle" : "\(total) idle"
-    }
 }
 
 // MARK: - Session Card
@@ -347,44 +546,93 @@ struct SessionCard: View {
     var onToast: (String) -> Void = { _ in }
     @State private var hovering = false
     @State private var jumpHovering = false
+    // branch + usage live on AgentSession itself, populated by
+    // SessionMetadataService while the panel is expanded. The card just
+    // reads them — no per-view Tasks, no per-card I/O.
+
+    private var badge: StatusBadge { StatusBadge.from(session) }
+    private var isWaiting: Bool { badge == .waiting }
 
     /// True when an inline action banner (permission or question) is showing.
-    /// Used to suppress redundant secondary content (activity feed, agent
-    /// kind capsule, hover-jump button) so the banner gets visual focus.
+    /// Suppresses Row 4's meta line so the banner gets visual focus.
     private var hasInlineBanner: Bool {
         session.pendingPermission != nil || session.pendingQuestion != nil
     }
 
+    /// Filepath shown between row2 (prompt) and row4 (meta). Sourced
+    /// from a pending permission first (the file the agent is asking
+    /// about right now), falling back to the most recent file-touching
+    /// tool. nil if neither applies — Bash permissions for non-file
+    /// commands like `curl` correctly omit this row.
+    private var displayFilePath: String? {
+        if let path = session.pendingPermission?.filePath, !path.isEmpty {
+            return path
+        }
+        if let path = session.currentToolCall?.toolInput["file_path"]?.stringValue, !path.isEmpty {
+            return path
+        }
+        return nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sessionBody
+            row1
+            row2Body
+            if let path = displayFilePath { row3FilePath(path) }
+            if !hasInlineBanner { row4Meta }
 
-            // Inline interaction card — permission has priority over a
-            // question (a session never legitimately has both, but if a race
-            // ever produces both we'd rather unblock the bridge first).
-            // Keeping the request visually tied to the project that triggered
-            // it is the whole point of inlining instead of floating at the
-            // top of the panel.
-            if let req = session.pendingPermission {
-                PermissionBanner(
-                    request: req,
-                    queuePosition: 1, queueTotal: 1,
-                    onAllow: { agentManager.approvePermission(id: req.id) },
-                    onAlwaysAllow: {
-                        let input = req.toolInput.mapValues { $0.value }
-                        let pattern = AllowRules.primaryArg(toolName: req.toolName, input: input)
-                        AllowRules.add(.init(toolName: req.toolName, pattern: pattern))
-                        agentManager.approvePermission(id: req.id)
-                        onToast("Always allow \(req.toolName) — rule saved")
-                    },
-                    onBypass: { agentManager.bypassPermission(id: req.id) },
-                    onDeny: { agentManager.denyPermission(id: req.id) },
-                    bypassArmedId: .init(
-                        get: { agentManager.bypassArmedId },
-                        set: { agentManager.bypassArmedId = $0 }
+            // Inline interaction card. Permission has priority over question
+            // (a single session never legitimately has both, but a race
+            // could; prioritize unblocking the bridge first).
+            //
+            // The Group + outer `.id()` is load-bearing: without it,
+            // SwiftUI preserves the @State reply text AND can render
+            // stale content when one permission immediately follows
+            // another on the same session (e.g. user clicks Allow on
+            // request A, then request B arrives — the banner can show
+            // A's tool input despite session.pendingPermission being B).
+            // Tying the wrapping Group's identity to the current pending
+            // permission id forces SwiftUI to tear down + rebuild the
+            // entire subtree whenever the permission changes, resetting
+            // @State and re-reading toolInput from the new request.
+            Group {
+                if let req = session.pendingPermission {
+                    PermissionBanner(
+                        request: req,
+                        queuePosition: 1, queueTotal: 1,
+                        strategy: session.agentKind.permissionStrategy,
+                        onAllow: { agentManager.approvePermission(id: req.id) },
+                        onAlwaysAllow: {
+                            // Dispatch through the agent's native rule writer.
+                            // `.notSupported` strategies hide the Always button
+                            // in the banner, so this branch shouldn't fire for
+                            // them — but if it somehow does, fall through to a
+                            // plain Allow without persistence.
+                            if case .native(let writer) = session.agentKind.permissionStrategy {
+                                let input = req.toolInput.mapValues { $0.value }
+                                do {
+                                    try writer.writeAllowRule(toolName: req.toolName, toolInput: input, cwd: req.cwd)
+                                    onToast("Always allow saved")
+                                } catch {
+                                    onToast("Couldn't save rule: \(error.localizedDescription)")
+                                }
+                            }
+                            agentManager.approvePermission(id: req.id)
+                        },
+                        onDeny: { reason in
+                            // Pass nil through when reply is empty — denyPermission
+                            // wraps with ClaudeCodeMessages.formattedRejection so
+                            // nil becomes the no-reason REJECT_MESSAGE and a real
+                            // reply becomes REJECT_MESSAGE_WITH_REASON_PREFIX + text.
+                            agentManager.denyPermission(id: req.id, reason: reason)
+                        },
+                        onJump: { TerminalJumper.jump(to: session) }
                     )
-                )
-            } else if let question = session.pendingQuestion {
+                }
+            }
+            .id(session.pendingPermission?.id ?? "no-pending")
+
+            if let question = session.pendingQuestion, session.pendingPermission == nil {
                 QuestionBanner(
                     question: question,
                     agentDisplayName: session.agentKind.displayName,
@@ -395,145 +643,321 @@ struct SessionCard: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.white.opacity(hovering ? 0.09 : 0.05))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(.white.opacity(0.08), lineWidth: 0.5)
-                )
+        .background(cardBackground)
+        .overlay(cardBorder)
+        // Subtle warm-orange glow on waiting cards so the eye snaps to
+        // them in a stack of 5+ cards.
+        .shadow(
+            color: isWaiting ? Color.ap.statusWaiting.opacity(0.08) : .clear,
+            radius: isWaiting ? 14 : 0,
+            x: 0, y: isWaiting ? 4 : 0
         )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.14), value: hovering)
+        .animation(.easeOut(duration: 0.18), value: isWaiting)
     }
 
-    @ViewBuilder
-    private var sessionBody: some View {
-        HStack(alignment: .top, spacing: 10) {
-            // Small agent icon — just enough to hint at agent type without
-            // dominating the card. 20pt feels proportional to 13pt title.
-            ZStack {
-                Circle()
-                    .fill(session.agentKind.tintColor.opacity(0.14))
-                Image(systemName: session.agentKind.iconName)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(session.agentKind.tintColor)
-            }
-            .frame(width: 22, height: 22)
-            .padding(.top, 1)
+    // MARK: - Row 1: agent tile + repo · branch + host badge + status
 
-            VStack(alignment: .leading, spacing: 5) {
-                // Row 1: project name, status dot, time
-                HStack(alignment: .center, spacing: 7) {
-                    Text(session.projectName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
+    @ViewBuilder
+    private var row1: some View {
+        HStack(spacing: 8) {
+            AgentMonogramTile(agent: session.agentKind)
+
+            // Repo + branch (when the cwd is a git repo). projectName is
+            // the cwd basename; branch comes from `git symbolic-ref` and
+            // is omitted gracefully when the cwd isn't a git repo or is
+            // in detached-HEAD state.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(session.projectName)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .tracking(-0.1)
+                    .foregroundStyle(Color.ap.fg)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(2)
+                if let branch = session.branch, !branch.isEmpty {
+                    Text(branch)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Color.ap.fgDim)
                         .lineLimit(1)
                         .truncationMode(.middle)
-
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 5, height: 5)
-
-                    Spacer(minLength: 4)
-
-                    Text(elapsedText)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.32))
-                }
-
-                // Row 2: prompt body — the hero of the card
-                if let prompt = session.lastUserPrompt, !prompt.isEmpty {
-                    Text(prompt)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("Idle — no recent prompt")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.32))
-                        .italic()
-                }
-
-                // Suppress secondary card content when a banner is active —
-                // the banner already communicates "what Claude needs from
-                // you" louder than the activity feed / agent kind row would.
-                // Showing them all at once just makes the card noisy and
-                // pushes the actionable banner further down the screen.
-                if !hasInlineBanner {
-                    // When active: show tool call activity feed + counter
-                    // When idle/waiting: show Claude's last reply (what it concluded)
-                    if session.status == .active, !session.recentTools.isEmpty {
-                        VStack(alignment: .leading, spacing: 3) {
-                            ActivityFeedView(tools: Array(session.recentTools.prefix(3)))
-                            if session.recentTools.count > 3 {
-                                Text("\(session.recentTools.count) tool calls so far")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.white.opacity(0.35))
-                            }
-                        }
-                        .padding(.top, 2)
-                    } else if session.status != .active,
-                              let reply = session.lastAssistantMessage, !reply.isEmpty {
-                        // Only show assistant reply when NOT active — prevents the
-                        // previous turn's reply from flashing while Claude is thinking
-                        // (the transcript poll restores the old message before the
-                        // new one is written).
-                        Text(reply)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.45))
-                            .lineLimit(2)
-                            .truncationMode(.tail)
-                    }
-
-                    // Row 3: agent kind + status as a single subtle line
-                    HStack(spacing: 6) {
-                        Text(session.agentKind.displayName)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(session.agentKind.tintColor.opacity(0.95))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(session.agentKind.tintColor.opacity(0.16))
-                            .clipShape(Capsule())
-
-                        Text("·")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.3))
-
-                        Text(statusText)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .lineLimit(1)
-                    }
-                    .padding(.top, 1)
+                        .layoutPriority(1)
                 }
             }
 
-            // Terminal jump button — visible on hover. Hidden only when a
-            // QuestionBanner is showing (it has its own "Answer in terminal"
-            // CTA). Permission banners KEEP the jump button so users can
-            // check context in the terminal before deciding.
-            if session.pendingQuestion == nil {
-                Button(action: { TerminalJumper.jump(to: session) }) {
-                    Image(systemName: "arrow.up.right.square")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white.opacity(jumpHovering ? 0.95 : 0.55))
-                        .padding(6)
-                        .background(
-                            Circle().fill(.white.opacity(jumpHovering ? 0.12 : 0.0))
-                        )
+            Spacer(minLength: 6)
+
+            // Host badge — only when we actually detected which terminal
+            // / editor app launched the agent (via libproc parent chain).
+            // Shown when nil rather than inferring would lie about data
+            // we don't have.
+            HStack(spacing: 6) {
+                if let host = session.host {
+                    HostBadge(host: host)
                 }
-                .buttonStyle(.plain)
-                .opacity(hovering ? 1 : 0)
-                .onHover { jumpHovering = $0 }
-                .help("Bring the terminal running this agent to the front")
+                if badge.shouldPulse {
+                    // Sessions card working dot: 1.6s — calm and steady.
+                    PulsingDot(color: badge.dotColor, size: 6, duration: 1.6)
+                } else {
+                    Circle()
+                        .fill(badge.dotColor)
+                        .frame(width: 6, height: 6)
+                }
+                Text(badge.label)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(badge.color)
+                    .fixedSize()
             }
         }
     }
 
+    // MARK: - Row 2: prompt + current action
+    //
+    // Two-row body: the user's most recent prompt up top (so context is
+    // always visible) and a "what's happening right now" line below it.
+    // The action line picks the most informative signal available:
+    //   1. A tool whose `PreToolUse` fired but hasn't completed → show the
+    //      tool, monospaced, with a pulsing dot. Agent is mid-turn.
+    //   2. Otherwise, the latest assistant reply (extracted from the
+    //      transcript by `TranscriptReader`). Updates near-real-time via
+    //      `TranscriptWatcher` — Claude Code writes one JSONL line per
+    //      completed turn, so we can't stream tokens but we DO see every
+    //      message as it lands.
+    //   3. If neither prompt nor action exists → "Idle".
+
+    private enum ActionLine {
+        case tool(ToolCall)
+        case assistantReply(String)
+    }
+
+    private var trimmedPrompt: String? {
+        guard let raw = session.lastUserPrompt else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// What to surface on the second line.
+    ///
+    /// `currentToolCall` is non-nil from the first `toolStarted` until the
+    /// reducer's `.stopped` event clears it at turn end. We surface it
+    /// throughout that entire window — including the `.succeeded` /
+    /// `.failed` gap between tools in a multi-tool turn — because falling
+    /// back to `lastAssistantMessage` there would briefly flash the
+    /// PREVIOUS turn's reply text (the new reply hasn't been written to
+    /// the transcript yet). Showing "Edit: foo.swift ✓" until the next
+    /// tool's `PreToolUse` fires is the right visual continuity.
+    ///
+    /// **Suppressed when a permission banner is showing**: the banner
+    /// already renders the same command verbatim in its code block, and
+    /// the running-dot animation here was misleading — the tool isn't
+    /// actually running, it's waiting for the user's click.
+    private var activeAction: ActionLine? {
+        if session.pendingPermission != nil { return nil }
+        if let tool = session.currentToolCall {
+            return .tool(tool)
+        }
+        if let reply = session.lastAssistantMessage, !reply.isEmpty {
+            return .assistantReply(reply)
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private var row2Body: some View {
+        let prompt = trimmedPrompt
+        let action = activeAction
+
+        if prompt == nil && action == nil {
+            Text("Idle — no recent activity")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.ap.fgFaint)
+                .italic()
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                if let prompt {
+                    Text(prompt)
+                        .font(.system(size: 12))
+                        .lineSpacing(4)
+                        .foregroundStyle(Color.ap.fgMuted)
+                        .lineLimit(action == nil ? 2 : 1)
+                        .truncationMode(.tail)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let action {
+                    actionLineView(action)
+                }
+            }
+        }
+    }
+
+    /// File-path row between row2 and row4. Monospaced, dimmed —
+    /// "what file is currently the subject of this card". For a
+    /// pending permission this is the file the agent wants to touch;
+    /// for an active session it's the last file the tool worked on.
+    @ViewBuilder
+    private func row3FilePath(_ path: String) -> some View {
+        HStack(spacing: 8) {
+            Text(path)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.42))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            // Diff stats (+N / -N) slot reserved — we don't track line
+            // counts yet. When we do, render here.
+        }
+    }
+
+    /// Visual indicator for the tool action line. Running = pulsing blue
+    /// (live work); succeeded = solid green; failed = solid red. Static
+    /// dots in terminal states keep the card calm — only ONE pulsing
+    /// thing on screen at a time (the live tool, or none).
+    @ViewBuilder
+    private func toolStatusIndicator(_ status: ToolCall.Status) -> some View {
+        switch status {
+        case .running:
+            PulsingDot(color: .ap.statusWorking, size: 5, duration: 1.4)
+        case .succeeded:
+            Circle().fill(Color.ap.statusDone).frame(width: 5, height: 5)
+        case .failed:
+            Circle().fill(Color.ap.statusError).frame(width: 5, height: 5)
+        }
+    }
+
+    @ViewBuilder
+    private func actionLineView(_ action: ActionLine) -> some View {
+        switch action {
+        case .tool(let tool):
+            HStack(spacing: 6) {
+                toolStatusIndicator(tool.status)
+                Text(tool.displayDescription)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.ap.fgDim)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        case .assistantReply(let text):
+            // Lower-contrast (fgDim) than the prompt above (fgMuted) so the
+            // two lines read as "user said X, agent said Y" at a glance.
+            Text(text)
+                .font(.system(size: 12))
+                .lineSpacing(4)
+                .foregroundStyle(Color.ap.fgDim)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Row 4: meta (elapsed · tokens · cost · jump)
+
+    @ViewBuilder
+    private var row4Meta: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 3) {
+                Image(systemName: "clock")
+                    .font(.system(size: 9))
+                Text(elapsedText)
+            }
+            .foregroundStyle(Color.ap.fgFaint)
+
+            if let tokenText = formattedTokens() {
+                Text(tokenText)
+                    .foregroundStyle(Color.ap.fgFaint)
+            }
+            if let costText = formattedCost() {
+                Text(costText)
+                    .foregroundStyle(Color.ap.fgFaint)
+            }
+
+            Spacer(minLength: 4)
+
+            Button(action: { TerminalJumper.jump(to: session) }) {
+                HStack(spacing: 3) {
+                    Text("Jump to terminal")
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .foregroundStyle(jumpHovering ? Color.white : Color.ap.fgFaint)
+            }
+            .buttonStyle(.plain)
+            .onHover { jumpHovering = $0 }
+            .help("Bring the terminal running this agent to the front")
+        }
+        .font(.system(size: 10))
+        .monospacedDigit()
+        .animation(.easeOut(duration: 0.12), value: jumpHovering)
+    }
+
+    /// Scales the cumulative token count into a compact human-readable
+    /// form. Visibility only conditions on `session.usage` being present —
+    /// formatting alone handles scale, so the value appears once the
+    /// first poll returns and never flickers in/out as count grows.
+    ///
+    /// - <1k     → "84 tok"
+    /// - 1k..1M  → "84.2k tok"
+    /// - 1M..1B  → "356.6M tok"
+    /// - ≥1B     → "2.1B tok"
+    private func formattedTokens() -> String? {
+        guard let usage = session.usage else { return nil }
+        let n = Double(usage.totalTokens)
+        if n >= 1_000_000_000 { return String(format: "%.1fB tok", n / 1_000_000_000) }
+        if n >= 1_000_000     { return String(format: "%.1fM tok", n / 1_000_000) }
+        if n >= 1_000         { return String(format: "%.1fk tok", n / 1_000) }
+        return "\(usage.totalTokens) tok"
+    }
+
+    /// "$0.42" / "<$0.01" / "$12.34". Hidden when the model is unknown
+    /// (cost would be wrong) or cost is exactly zero (no work done yet).
+    /// Any non-zero cost — even fractions of a cent — shows as `<$0.01`
+    /// so the user gets feedback the moment billing starts.
+    private func formattedCost() -> String? {
+        guard let cost = session.usage?.estimatedCostUSD, cost > 0 else { return nil }
+        if cost < 0.01 { return "<$0.01" }
+        return String(format: "$%.2f", cost)
+    }
+
+    // MARK: - Background / border
+
+    @ViewBuilder
+    private var cardBackground: some View {
+        let fill: Color = {
+            if isWaiting { return Color.ap.rowBgWaiting }
+            return hovering
+                ? Color.white.opacity(0.09)
+                : Color.ap.rowBg
+        }()
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(fill)
+    }
+
+    @ViewBuilder
+    private var cardBorder: some View {
+        // Spec waiting row boxShadow includes an INNER 0.5px stroke at
+        // rgba(255,159,10,.25) that sits *inside* the primary orange
+        // border. SwiftUI doesn't have a CSS-style inset shadow, so we
+        // approximate it with a second RoundedRectangle stroke inset by
+        // 0.5pt from the primary border.
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(
+                    isWaiting ? Color.ap.rowStrokeWaiting : Color.ap.strokeStrong,
+                    lineWidth: isWaiting ? 1.0 : 0.5
+                )
+            if isWaiting {
+                RoundedRectangle(cornerRadius: 9.5, style: .continuous)
+                    .inset(by: 0.5)
+                    .stroke(
+                        Color.ap.statusWaiting.opacity(0.25),
+                        lineWidth: 0.5
+                    )
+            }
+        }
+    }
 }
 
 // MARK: - Activity Feed
@@ -619,42 +1043,6 @@ struct ActivityRow: View {
 }
 
 extension SessionCard {
-    private var statusColor: Color {
-        // Pending question is shown in the body, but the status dot should
-        // also reflect "Claude is asking you something" — same blue/cyan as
-        // the QuestionBanner so the eye associates them.
-        if session.pendingQuestion != nil {
-            return Color(red: 0.36, green: 0.72, blue: 0.95)
-        }
-        switch session.status {
-        case .active: return .green
-        case .waitingForPermission: return .orange
-        case .waitingForInput: return .yellow.opacity(0.8)
-        case .idle: return .gray
-        case .done: return .blue.opacity(0.7)
-        case .stopped: return .red.opacity(0.5)
-        }
-    }
-
-    private var statusText: String {
-        if session.pendingQuestion != nil {
-            return "Asking you a question"
-        }
-        switch session.status {
-        case .active:
-            // Show current tool call if running, otherwise generic "Working..."
-            if let tool = session.currentToolCall, tool.status == .running {
-                return tool.displayDescription
-            }
-            return "Working..."
-        case .waitingForInput: return "Waiting for input"
-        case .waitingForPermission: return "Needs permission"
-        case .idle: return "Idle"
-        case .done: return "Done"
-        case .stopped: return "Stopped"
-        }
-    }
-
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MMM d"

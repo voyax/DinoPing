@@ -12,6 +12,7 @@ public struct TranscriptReader: Sendable {
     /// Prefixes that mark a message as system-generated (not user-typed).
     private static let wrapperPrefixes = [
         "<command-name>", "<local-command-stdout>", "<command-message>",
+        "<local-command-caveat>",
         "<system-reminder>", "<task-notification>",
         "<user-prompt-submit-hook>",
         "[Request interrupted",
@@ -21,6 +22,8 @@ public struct TranscriptReader: Sendable {
     /// XML tags that may appear inline and should be stripped.
     private static let inlineTags = [
         "system-reminder", "task-notification", "user-prompt-submit-hook",
+        "local-command-caveat", "command-name", "command-message",
+        "command-args", "local-command-stdout",
     ]
 
     public init() {}
@@ -168,7 +171,8 @@ public struct TranscriptReader: Sendable {
 
     /// Extracts user prompt text from one jsonl line. Returns nil if not a real user prompt.
     /// Filters out tool_result messages (those have role=user but are not actual prompts).
-    private func extractUserPrompt(from line: String) -> String? {
+    /// Exposed for tests.
+    internal func extractUserPrompt(from line: String) -> String? {
         guard let data = line.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
