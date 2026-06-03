@@ -11,6 +11,7 @@ final class AppState {
     private let hookInstaller = HookInstaller()
     private var serverTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
+    private var livenessTask: Task<Void, Never>?
     private var observeTask: Task<Void, Never>?
     private var lastKnownPermCount = 0
 
@@ -151,26 +152,34 @@ final class AppState {
             }
         }
 
+        // Fast death detection: one cheap `ps` snapshot every few seconds
+        // (off-main, no per-session lsof), applied on the main actor. This is
+        // what makes the count drop within ~3s when an instance closes —
+        // Claude Code rarely fires SessionEnd hooks (it exits on SIGINT/SIGHUP
+        // without running them), so process liveness is the reliable signal.
+        livenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Constants.livenessPollSeconds)
+                guard let self else { break }
+                let livePids = await Task.detached { SessionDiscovery().liveAgentPids() }.value
+                // nil = probe failed (not "zero agents"). Skip this tick so a
+                // transient `ps` hiccup never prunes every live session.
+                guard let livePids else { continue }
+                self.agentManager.reconcileLiveness(livePids: livePids)
+            }
+        }
+
+        // Slow housekeeping: heavier work that doesn't need to be frequent.
+        // `rediscover` (ps + per-process lsof + transcript scan) doubles as
+        // the pid-backfill catch-all behind the creation-time backfill.
         cleanupTask = Task { [weak self] in
-            var tick = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
                 guard let self else { break }
-                let beforeHeartbeat = self.agentManager.activeSessions.count
-                self.agentManager.heartbeatCheck()
-                let afterHeartbeat = self.agentManager.activeSessions.count
-                if afterHeartbeat < beforeHeartbeat {
-                    SoundManager.shared.play(.agentError)
-                }
                 self.agentManager.cleanupStaleSessions()
                 self.agentManager.cleanupTestSessions()
                 self.agentManager.reconcilePendingPermissions()
-                // Every ~60s, re-scan for processes we may have missed or
-                // whose sessions got cleaned up while still alive.
-                tick += 1
-                if tick % 2 == 0 {
-                    self.agentManager.rediscover()
-                }
+                self.agentManager.rediscover()
             }
         }
 
@@ -449,6 +458,7 @@ final class AppState {
     func stop() {
         serverTask?.cancel()
         cleanupTask?.cancel()
+        livenessTask?.cancel()
         observeTask?.cancel()
         agentManager.transcriptWatcher?.unwatchAll()
 

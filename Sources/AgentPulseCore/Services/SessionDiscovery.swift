@@ -41,6 +41,40 @@ public struct SessionDiscovery: Sendable {
         return results
     }
 
+    /// Cheap liveness probe: the set of currently-live agent PIDs. One
+    /// `ps -eo pid,comm` call, NO per-process lsof — safe to poll every few
+    /// seconds. Used by the fast death-detection loop. A session whose pid
+    /// is absent from this set has exited.
+    ///
+    /// Returns `nil` when the probe itself failed (spawn error, timeout, or a
+    /// truncated listing) — distinct from an empty set, which means "`ps`
+    /// succeeded and no agents are running". The caller MUST treat `nil` as
+    /// "unknown, skip this tick": a failed probe parsed as an empty set would
+    /// mark every tracked session dead and prune the whole count on one bad
+    /// poll.
+    public func liveAgentPids() -> Set<Int>? {
+        guard let output = shell("ps -eo pid,comm", timeout: 5) else { return nil }
+        let lines = output
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        // A healthy `ps -eo pid,comm` lists the entire process table (dozens
+        // of lines plus a header). A near-empty result means the probe was
+        // killed/timed out before producing real output, not that every
+        // process on the machine vanished — signal failure rather than "no
+        // agents" so we never prune on a bad poll.
+        guard lines.count >= 5 else { return nil }
+        var pids = Set<Int>()
+        for line in lines {
+            for matcher in Self.processMatchers where line.hasSuffix(matcher.suffix) {
+                let parts = line.split(separator: " ", maxSplits: 1)
+                if let pid = Int(parts.first ?? "") { pids.insert(pid) }
+                break
+            }
+        }
+        return pids
+    }
+
     // MARK: - Process Scanning
 
     private struct AgentProcess {

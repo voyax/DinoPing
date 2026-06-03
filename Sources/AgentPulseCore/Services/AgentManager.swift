@@ -203,6 +203,11 @@ public final class AgentManager {
         if let existing = sessions[id] { return existing }
         let session = AgentSession(id: id, cwd: cwd)
         sessions[id] = session
+        // Hook payloads carry no pid — resolve one in the background so the
+        // fast liveness loop can detect this session's exit. Without this,
+        // hook-created sessions stay pid-less and only the 30-min stale
+        // timeout would ever remove them.
+        backfillPid(for: session)
         // Register the new session's transcript for file watching
         if let url = transcriptReader.transcriptURL(cwd: cwd, sessionId: id) {
             transcriptWatcher?.watch(path: url.path)
@@ -370,8 +375,26 @@ public final class AgentManager {
             }.value
             let existingCwds = Set(sessions.values.map(\.cwd))
             for (info, prompt) in discovered {
-                // Skip if this session ID already exists
-                guard sessions[info.sessionId] == nil else { continue }
+                // Already tracked? Backfill a pid if it's still missing
+                // (hook-created sessions arrive without one), then move on.
+                // This is the catch-all behind the creation-time backfill.
+                if let existing = sessions[info.sessionId] {
+                    if existing.pid == nil {
+                        // The transcript is authoritative about which session
+                        // owns this pid. If another session is wrongly holding
+                        // it (a backfill that raced a same-cwd restart, or a
+                        // recycled pid), reclaim it — self-heals a mis-binding
+                        // within one slow-sweep instead of letting the bad
+                        // session linger up to 30 minutes.
+                        if let usurper = sessions.values.first(
+                            where: { $0.id != existing.id && $0.pid == info.pid }
+                        ) {
+                            usurper.pid = nil
+                        }
+                        existing.pid = info.pid
+                    }
+                    continue
+                }
                 // Skip PID-based fallback IDs if another session with the
                 // same cwd exists (hooks provide the real ID). But allow
                 // transcript-matched IDs even for the same cwd — those are
@@ -388,35 +411,101 @@ public final class AgentManager {
         }
     }
 
-    /// Check if discovered processes are still alive (kill -0 pid).
-    /// Requires 2 consecutive misses before marking as stopped (debounce).
-    public func heartbeatCheck() {
+    /// Fast death detection from a single `ps` snapshot (passed in from an
+    /// off-main poll). A pid-bearing session whose pid is absent from the
+    /// live set has exited — mark it ended immediately. No debounce: `ps`
+    /// is authoritative, unlike the old per-session `kill(pid,0)` which
+    /// needed 2 misses to absorb transient errors.
+    ///
+    /// Sessions with `pid == nil` (backfill pending/failed, or extra team
+    /// members sharing one pid) are NOT touched here — they fall back to
+    /// `cleanupStaleSessions`. Backfill normally attaches a pid within
+    /// seconds, so this covers the common case.
+    public func reconcileLiveness(livePids: Set<Int>) {
         for session in sessions.values {
             guard let pid = session.pid, pid > 0 else { continue }
-            let alive = kill(Int32(pid), 0) == 0
-            if alive {
-                session.missedHeartbeats = 0
-            } else {
-                session.missedHeartbeats += 1
-                if session.missedHeartbeats >= 2, session.status != .done {
-                    session.apply(.sessionEnded)
-                    Logger.agentManager.info("Process \(pid, privacy: .public) gone — \(session.projectName, privacy: .public) done")
-                }
+            if !livePids.contains(pid), session.status != .done {
+                session.apply(.sessionEnded)
+                Logger.agentManager.info("PID \(pid, privacy: .public) gone — \(session.projectName, privacy: .public) done")
             }
         }
+        pruneFinishedSessions()
+    }
 
-        // Remove sessions that have been .done for 8+ seconds, or .stopped.
+    /// Remove sessions that have finished: `.stopped`, or `.done` for longer
+    /// than the linger window. Also sweeps orphaned `proc-<pid>` placeholders.
+    private func pruneFinishedSessions() {
         let now = Date.now
-        let removeIds = sessions.filter { _, s in
+        let removeIds = sessions.filter { id, s in
             if s.status == .stopped { return true }
             if s.status == .done {
-                return now.timeIntervalSince(s.lastEventTime) > 8
+                return now.timeIntervalSince(s.lastEventTime) > Constants.doneLingerSeconds
             }
+            // A `proc-<pid>` session's whole identity IS its pid — it's the
+            // fallback we mint when a live process can't be matched to a
+            // transcript. If self-heal later reclaims that pid for the real
+            // (hook/transcript) session, the placeholder is left pid-less and
+            // redundant. Liveness can't reap it (no pid to check), so it would
+            // double-count the same process until the 30-min cleanup. Drop it.
+            if id.hasPrefix("proc-"), s.pid == nil { return true }
             return false
         }.map(\.key)
         for id in removeIds {
             denyPendingPermissions(forSessionId: id, reason: "Session ended")
             removeSession(id)
         }
+    }
+
+    // MARK: - PID backfill
+
+    /// True if `pid` is already bound to some session other than `excluding`.
+    /// Used to keep pid→session assignment exclusive so two sessions never
+    /// claim the same process.
+    private func pidIsTaken(_ pid: Int, excluding sessionId: String) -> Bool {
+        sessions.values.contains { $0.id != sessionId && $0.pid == pid }
+    }
+
+    /// Resolve and attach a pid to a hook-created session (which arrives
+    /// without one — Claude Code hook payloads carry no pid). Retries briefly
+    /// because the process may not be visible the instant the first hook fires.
+    ///
+    /// Matching goes through the transcript-authoritative discovery (the same
+    /// mapping `rediscover` uses), NOT bare cwd. A bare-cwd match would let a
+    /// stale pid-less session steal the live process of a *different* session
+    /// that shares its directory (e.g. claude restarted in the same repo),
+    /// inflating the count. `discoverClaudeCodeSessions` maps each live pid to
+    /// the session whose transcript it owns, so we only ever bind the pid that
+    /// genuinely belongs to `sid`.
+    private func backfillPid(for session: AgentSession) {
+        let sid = session.id
+        Task { [weak self] in
+            for _ in 0..<5 {
+                guard let self else { return }
+                guard self.sessions[sid]?.pid == nil else { return }
+                let discovered = await Task.detached {
+                    SessionDiscovery().discoverClaudeCodeSessions()
+                }.value
+                if self.bindDiscoveredPid(discovered, to: sid) { return }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    /// Bind the pid whose discovered session id matches `sessionId`, provided
+    /// no other session already holds it. Returns true when the backfill loop
+    /// should stop — bound, session gone, or session already has a pid. Returns
+    /// false (keep retrying) only when no live process maps to this session yet.
+    private func bindDiscoveredPid(
+        _ discovered: [SessionDiscovery.DiscoveredSession],
+        to sessionId: String
+    ) -> Bool {
+        guard let session = sessions[sessionId] else { return true }
+        guard session.pid == nil else { return true }
+        guard let match = discovered.first(where: { $0.sessionId == sessionId }),
+              !pidIsTaken(match.pid, excluding: sessionId) else {
+            return false
+        }
+        session.pid = match.pid
+        return true
     }
 }
