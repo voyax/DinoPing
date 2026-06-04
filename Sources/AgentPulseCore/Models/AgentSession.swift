@@ -8,8 +8,7 @@ public final class AgentSession: Identifiable, @unchecked Sendable {
     public let id: String
     public let agentKind: AgentKind
     public let cwd: String
-    public var pid: Int?  // Process ID for heartbeat checking
-    public var missedHeartbeats: Int = 0  // Consecutive missed checks before marking dead
+    public var pid: Int?  // Process ID for liveness checking
     public var projectName: String
     public var status: SessionStatus
     public var currentToolCall: ToolCall?
