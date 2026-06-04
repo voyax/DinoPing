@@ -2,13 +2,15 @@ import AgentPulseCore
 import AppKit
 import Foundation
 
-/// Brings whatever terminal-emulator app is running Claude Code to the front.
+/// Brings the terminal-emulator app running this session to the front and,
+/// where the emulator's scripting dictionary allows, focuses the exact tab.
 ///
-/// Best-effort and intentionally minimal: we don't try to focus a specific
-/// tab/pane (the AppleScript surface for that is different in every terminal
-/// emulator). The goal is just "get the user out of the notch panel and back
-/// to where they were typing", which works as long as we activate the right
-/// app — the user's eyes do the rest.
+/// Tab focus is best-effort and per-emulator: iTerm2 / Terminal match on the
+/// session `tty`; Ghostty matches on the per-terminal `working directory`.
+/// Emulators we can't script just get app-level activation — the user's eyes
+/// do the rest. NOTE: the AppleScript path needs macOS Automation permission
+/// for AgentPulse to control the terminal; app activation works without it,
+/// so a missing grant looks like "switched app but not tab".
 enum TerminalJumper {
     /// Bundle identifiers we recognize as hosts for AI agent sessions.
     /// Includes standalone terminals AND editors with integrated terminals.
@@ -35,7 +37,7 @@ enum TerminalJumper {
            let hostApp = findHostApp(forPID: pid) {
             hostApp.activate(options: [.activateAllWindows])
             // Try to focus the exact tab/pane via AppleScript (best-effort)
-            focusTabForPID(pid, bundleID: hostApp.bundleIdentifier ?? "")
+            focusTab(forPID: pid, cwd: session.cwd, bundleID: hostApp.bundleIdentifier ?? "")
             return
         }
 
@@ -49,24 +51,31 @@ enum TerminalJumper {
         NSSound.beep()
     }
 
-    /// Best-effort: use AppleScript to find and focus the tab whose tty
-    /// hosts the given PID's process tree.
-    private static func focusTabForPID(_ pid: Int, bundleID: String) {
-        guard let rawTTY = ttyForPID(pid) else { return }
-        // Sanitize tty before embedding in AppleScript to prevent injection
-        let tty = rawTTY
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+    /// Best-effort: use AppleScript to find and focus the exact tab hosting
+    /// this session. iTerm2 and Terminal expose a per-session `tty`, so we
+    /// match on that (precise even with several tabs in the same directory).
+    /// Ghostty has no `tty` in its scripting dictionary but does expose a
+    /// per-terminal `working directory`, so we fall back to matching on cwd
+    /// (ambiguous only when two Ghostty tabs sit in the same directory).
+    private static func focusTab(forPID pid: Int, cwd: String, bundleID: String) {
+        // Sanitize anything embedded in AppleScript to prevent injection.
+        func escaped(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+        }
 
         let script: String?
         switch bundleID {
         case "com.googlecode.iterm2":
+            guard let rawTTY = ttyForPID(pid) else { return }
+            let tty = escaped(rawTTY)
             script = """
             tell application "iTerm2"
                 repeat with w in windows
                     repeat with t in tabs of w
                         repeat with s in sessions of t
                             if tty of s contains "\(tty)" then
+                                select w
                                 select t
                                 select s
                                 return
@@ -77,6 +86,8 @@ enum TerminalJumper {
             end tell
             """
         case "com.apple.Terminal":
+            guard let rawTTY = ttyForPID(pid) else { return }
+            let tty = escaped(rawTTY)
             script = """
             tell application "Terminal"
                 repeat with w in windows
@@ -86,6 +97,23 @@ enum TerminalJumper {
                             set frontmost of w to true
                             return
                         end if
+                    end repeat
+                end repeat
+            end tell
+            """
+        case "com.mitchellh.ghostty":
+            let dir = escaped(cwd)
+            script = """
+            tell application "Ghostty"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        try
+                            if working directory of (focused terminal of t) is "\(dir)" then
+                                select tab t
+                                activate window w
+                                return
+                            end if
+                        end try
                     end repeat
                 end repeat
             end tell
