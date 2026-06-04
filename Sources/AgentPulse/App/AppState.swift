@@ -1,4 +1,5 @@
 import AgentPulseCore
+import Carbon.HIToolbox
 import SwiftUI
 import os
 
@@ -14,6 +15,9 @@ final class AppState {
     private var livenessTask: Task<Void, Never>?
     private var observeTask: Task<Void, Never>?
     private var lastKnownPermCount = 0
+    private let hotKeys = GlobalHotKeys()
+    /// Round-robin cursor for ⌥⌘J so repeated presses cycle through targets.
+    private var jumpCursor = 0
 
     init() {
         let token = UUID().uuidString
@@ -187,7 +191,66 @@ final class AppState {
         // a write (e.g., file was replaced instead of appended).
         agentManager.installTranscriptWatcher()
 
+        registerHotKeys()
+
         Logger.app.info("Services started")
+    }
+
+    // MARK: - Global hot-keys
+
+    /// App-wide shortcuts so the user can respond to an agent without leaving
+    /// whatever app they're in. All use ⌥⌘ — uncommon enough to dodge most
+    /// system / app conflicts.
+    private func registerHotKeys() {
+        let optCmd = UInt32(optionKey | cmdKey)
+        hotKeys.register([
+            // ⌥⌘P — toggle the notch panel.
+            .init(keyCode: UInt32(kVK_ANSI_P), modifiers: optCmd) { [weak self] in
+                self?.toggleNotchPanel()
+            },
+            // ⌥⌘J — jump to the terminal of the next session needing attention.
+            .init(keyCode: UInt32(kVK_ANSI_J), modifiers: optCmd) { [weak self] in
+                self?.jumpToNextWaitingSession()
+            },
+            // ⌥⌘Return — approve the front pending permission.
+            .init(keyCode: UInt32(kVK_Return), modifiers: optCmd) { [weak self] in
+                self?.approveFrontPermission()
+            },
+            // ⌥⌘Delete — deny the front pending permission.
+            .init(keyCode: UInt32(kVK_Delete), modifiers: optCmd) { [weak self] in
+                self?.denyFrontPermission()
+            },
+        ])
+    }
+
+    func toggleNotchPanel() {
+        guard let panel = notchPanel else { return }
+        if panel.panelState.isVisible { panel.hide() } else { panel.transitionToExpanded() }
+    }
+
+    /// Jump to the terminal of a session that needs the user. Prefers sessions
+    /// in the `.waiting` badge state (pending permission / question); if none
+    /// are waiting, cycles through all active sessions so the key is still
+    /// useful. Repeated presses round-robin through the candidates.
+    func jumpToNextWaitingSession() {
+        let active = agentManager.activeSessions
+        let waiting = active.filter { StatusBadge.from($0) == .waiting }
+        let targets = waiting.isEmpty ? active : waiting
+        guard !targets.isEmpty else { NSSound.beep(); return }
+        if jumpCursor >= targets.count { jumpCursor = 0 }
+        let session = targets[jumpCursor]
+        jumpCursor = (jumpCursor + 1) % targets.count
+        TerminalJumper.jump(to: session)
+    }
+
+    func approveFrontPermission() {
+        guard let perm = agentManager.pendingPermissions.first else { NSSound.beep(); return }
+        agentManager.approvePermission(id: perm.id)
+    }
+
+    func denyFrontPermission() {
+        guard let perm = agentManager.pendingPermissions.first else { NSSound.beep(); return }
+        agentManager.denyPermission(id: perm.id)
     }
 
     // MARK: - Notch UI
@@ -455,6 +518,7 @@ final class AppState {
     }
 
     func stop() {
+        hotKeys.unregisterAll()
         serverTask?.cancel()
         cleanupTask?.cancel()
         livenessTask?.cancel()

@@ -49,6 +49,7 @@ struct MenuBarView: View {
             MenuToggleRow(
                 title: "Notch Panel",
                 systemImage: "macwindow",
+                shortcut: "⌥⌘P",
                 isOn: Binding(
                     get: { appState.notchPanel?.panelState.isVisible ?? false },
                     set: { on in
@@ -179,6 +180,7 @@ private struct MenuActionRow: View {
 private struct MenuToggleRow: View {
     let title: String
     let systemImage: String
+    var shortcut: String? = nil
     @Binding var isOn: Bool
 
     var body: some View {
@@ -188,6 +190,11 @@ private struct MenuToggleRow: View {
                 .frame(width: 16)
             Text(title).font(.system(size: 12))
             Spacer()
+            if let shortcut {
+                Text(shortcut)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
