@@ -303,8 +303,6 @@ struct NotchContentView: View {
         VStack(spacing: 0) {
             // Top space to clear the notch silhouette overhang.
             Color.clear.frame(height: topInset)
-            // Sticky header with brand + session count.
-            panelHeader(sessionCount: sessions.count)
 
             if sessions.isEmpty && permissions.isEmpty {
                 VStack(spacing: 10) {
@@ -423,50 +421,23 @@ struct NotchContentView: View {
             .animation(.easeInOut(duration: 0.22), value: toastMessage)
             }   // closes `else` (populated branch)
 
-            // Footer — keyboard hint + Settings link. Stays anchored to
-            // the bottom of the silhouette regardless of session count.
-            panelFooter
+            // Footer — session count + keyboard hint + Settings. Stays
+            // anchored to the bottom of the silhouette regardless of count.
+            panelFooter(sessionCount: sessions.count)
         }   // closes outer VStack(spacing: 0)
     }
 
     // MARK: - Panel header / footer
 
     @ViewBuilder
-    private func panelHeader(sessionCount: Int) -> some View {
+    private func panelFooter(sessionCount: Int) -> some View {
         HStack(spacing: 8) {
-            Text("AgentPulse")
-                .font(.system(size: 12, weight: .semibold))
-                .tracking(-0.1)
-                .foregroundStyle(Color.ap.fg)
-
             Text("\(sessionCount) " + (sessionCount == 1 ? "session" : "sessions"))
-                .font(.system(size: 10.5))
                 .foregroundStyle(Color.ap.fgDim)
                 .monospacedDigit()
 
             Spacer(minLength: 4)
 
-            // Right-click on the silhouette already exposes the Display
-            // picker + Uninstall menu (see NotchPanel.swift). Surface
-            // that as a hint so users know it exists.
-            Image(systemName: "ellipsis")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.ap.fgDim)
-                .help("Right-click the notch for display, allow-rules, and uninstall options")
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.ap.divider)
-                .frame(height: 0.5)
-        }
-    }
-
-    @ViewBuilder
-    private var panelFooter: some View {
-        HStack(spacing: 8) {
             Text("⌥⌘P")
                 .font(.system(size: 9.5, design: .monospaced))
                 .foregroundStyle(Color.white.opacity(0.7))
@@ -478,13 +449,19 @@ struct NotchContentView: View {
             Text("toggle")
                 .foregroundStyle(Color.ap.fgDim)
 
-            Spacer(minLength: 4)
-
-            Text("Settings")
+            // Real button (the old footer was a non-interactive label, so it
+            // looked clickable but did nothing). SettingsLink is the supported
+            // way to open the Settings scene from an accessory app.
+            SettingsLink {
+                HStack(spacing: 3) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Settings")
+                }
                 .foregroundStyle(Color.ap.fgDim)
-            Image(systemName: "gearshape")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color.ap.fgDim)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
         .font(.system(size: 10))
         .padding(.horizontal, 12)

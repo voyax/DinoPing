@@ -7,13 +7,17 @@ struct AgentPulseApp: App {
     @State private var appState = AppState()
 
     var body: some Scene {
-        MenuBarExtra("AgentPulse", systemImage: "waveform.path.ecg") {
+        MenuBarExtra("DinoPing", systemImage: "waveform.path.ecg") {
             MenuBarView(appState: appState)
         }
         // `.window` (not the default `.menu`) so we get full SwiftUI layout:
         // the native menu templates icons to monochrome and can't render the
         // colored status dots / monogram tiles, and mangles HStack+Spacer rows.
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(appState: appState)
+        }
     }
 }
 
@@ -49,7 +53,7 @@ struct MenuBarView: View {
             MenuToggleRow(
                 title: "Notch Panel",
                 systemImage: "macwindow",
-                shortcut: "⌥⌘P",
+                shortcut: HotKeySettings.shared.combo(for: .togglePanel).display,
                 isOn: Binding(
                     get: { appState.notchPanel?.panelState.isVisible ?? false },
                     set: { on in
@@ -61,8 +65,10 @@ struct MenuBarView: View {
 
             MenuDivider()
 
+            SettingsMenuRow()
+
             MenuActionRow(
-                title: "Quit AgentPulse", systemImage: "power",
+                title: "Quit DinoPing", systemImage: "power",
                 shortcut: "⌘Q", destructive: true
             ) {
                 appState.stop()
@@ -204,6 +210,37 @@ private struct MenuToggleRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Opens the Settings scene. Uses `SettingsLink` (the supported path on
+/// macOS 14+) rather than the `showSettingsWindow:` selector, which doesn't
+/// fire reliably for an `.accessory` (menu-bar-only) app.
+private struct SettingsMenuRow: View {
+    @State private var hovering = false
+
+    var body: some View {
+        SettingsLink {
+            HStack(spacing: 8) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12))
+                    .frame(width: 16)
+                Text("Settings…").font(.system(size: 12))
+                Spacer()
+                Text("⌘,").font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering ? Color.primary.opacity(0.08) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 

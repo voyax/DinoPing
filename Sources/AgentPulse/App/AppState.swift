@@ -1,5 +1,4 @@
 import AgentPulseCore
-import Carbon.HIToolbox
 import SwiftUI
 import os
 
@@ -18,6 +17,8 @@ final class AppState {
     private let hotKeys = GlobalHotKeys()
     /// Round-robin cursor for ⌥⌘J so repeated presses cycle through targets.
     private var jumpCursor = 0
+    let updateChecker = UpdateChecker()
+    private let updatePrompt = UpdatePromptPresenter()
 
     init() {
         let token = UUID().uuidString
@@ -61,7 +62,7 @@ final class AppState {
                 Logger.app.error("Hook install: \(error.localizedDescription, privacy: .public)")
                 DispatchQueue.main.async {
                     let alert = NSAlert()
-                    alert.messageText = "AgentPulse couldn't install Claude Code hooks"
+                    alert.messageText = "DinoPing couldn't install Claude Code hooks"
                     alert.informativeText = error.localizedDescription
                     alert.alertStyle = .warning
                     alert.addButton(withTitle: "OK")
@@ -192,35 +193,55 @@ final class AppState {
         agentManager.installTranscriptWatcher()
 
         registerHotKeys()
+        checkForUpdatesOnLaunch()
 
         Logger.app.info("Services started")
+    }
+
+    /// Silent background update check shortly after launch. If a newer release
+    /// is out (and the user hasn't skipped it), surface the update window.
+    private func checkForUpdatesOnLaunch() {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self else { return }
+            await self.updateChecker.check(auto: true)
+            guard case .available(let update) = self.updateChecker.status,
+                  update.version != self.updateChecker.skippedVersion else { return }
+            self.updatePrompt.show(update) { [weak self] version in
+                self?.updateChecker.skip(version)
+            }
+        }
     }
 
     // MARK: - Global hot-keys
 
     /// App-wide shortcuts so the user can respond to an agent without leaving
-    /// whatever app they're in. All use ⌥⌘ — uncommon enough to dodge most
-    /// system / app conflicts.
+    /// whatever app they're in. Bindings come from `HotKeySettings` (defaults
+    /// to ⌥⌘ combos) and re-register whenever the user edits one in Settings.
     private func registerHotKeys() {
-        let optCmd = UInt32(optionKey | cmdKey)
-        hotKeys.register([
-            // ⌥⌘P — toggle the notch panel.
-            .init(keyCode: UInt32(kVK_ANSI_P), modifiers: optCmd) { [weak self] in
-                self?.toggleNotchPanel()
-            },
-            // ⌥⌘J — jump to the terminal of the next session needing attention.
-            .init(keyCode: UInt32(kVK_ANSI_J), modifiers: optCmd) { [weak self] in
-                self?.jumpToNextWaitingSession()
-            },
-            // ⌥⌘Return — approve the front pending permission.
-            .init(keyCode: UInt32(kVK_Return), modifiers: optCmd) { [weak self] in
-                self?.approveFrontPermission()
-            },
-            // ⌥⌘Delete — deny the front pending permission.
-            .init(keyCode: UInt32(kVK_Delete), modifiers: optCmd) { [weak self] in
-                self?.denyFrontPermission()
-            },
-        ])
+        HotKeySettings.shared.onChange = { [weak self] in self?.applyHotKeys() }
+        applyHotKeys()
+    }
+
+    private func applyHotKeys() {
+        let settings = HotKeySettings.shared
+        let bindings = HotKeyAction.allCases.map { action in
+            let combo = settings.combo(for: action)
+            return GlobalHotKeys.Binding(
+                keyCode: combo.keyCode, modifiers: combo.carbonModifiers
+            ) { [weak self] in self?.perform(action) }
+        }
+        hotKeys.unregisterAll()
+        hotKeys.register(bindings)
+    }
+
+    private func perform(_ action: HotKeyAction) {
+        switch action {
+        case .togglePanel:   toggleNotchPanel()
+        case .jumpToWaiting: jumpToNextWaitingSession()
+        case .approve:       approveFrontPermission()
+        case .deny:          denyFrontPermission()
+        }
     }
 
     func toggleNotchPanel() {

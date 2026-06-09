@@ -686,7 +686,7 @@ final class NotchPanel {
         uninstall.target = panel
         menu.addItem(uninstall)
 
-        let quit = NSMenuItem(title: "Quit AgentPulse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit DinoPing", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
 
