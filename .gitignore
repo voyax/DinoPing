@@ -5,3 +5,7 @@
 DerivedData/
 .swiftpm/
 test_permission.txt
+
+# Local design drafts — not published
+design_handoff_agentpulse/
+designs/
