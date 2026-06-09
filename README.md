@@ -66,7 +66,7 @@ All four are rebindable in **Settings → Shortcuts**.
 > A packaged build with one-click updates is on the roadmap.
 
 ```sh
-git clone https://github.com/OWNER/DinoPing.git
+git clone https://github.com/voyax/DinoPing.git
 cd DinoPing
 swift build -c release
 swift run -c release AgentPulse

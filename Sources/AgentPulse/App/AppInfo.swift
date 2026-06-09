@@ -17,9 +17,9 @@ enum AppInfo {
     static let copyright = "© 2026 voya. All rights reserved."
 
     /// `owner/repo` for the GitHub Releases update feed; `nil` disables update
-    /// checks. TODO: replace OWNER with your GitHub username/org, then create the
-    /// repo, push, and publish tagged releases (e.g. `v0.2.0`) with notes.
-    static let githubRepo: String? = "OWNER/DinoPing"
+    /// checks. The repo must be public for the unauthenticated Releases API to
+    /// return data. Publish tagged releases (e.g. `v0.2.0`) with notes in the body.
+    static let githubRepo: String? = "voyax/DinoPing"
 
     /// Public links. `nil` until the product has a real home — About hides any
     /// button whose URL is nil rather than pointing at a 404.
