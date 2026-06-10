@@ -9,8 +9,7 @@ you're running — who's working, who's blocked waiting on you, and who just
 finished — and lets you jump in or approve with a single keystroke, without
 alt-tabbing through a dozen terminal tabs.
 
-<!-- TODO: drop a hero screenshot / GIF here -->
-<!-- <img src="docs/hero.png" width="720" alt="DinoPing in the notch"> -->
+<img src="docs/hero.png" width="720" alt="DinoPing showing an agent's permission request — a diff with Allow / Always / Deny — right in the notch">
 
 </div>
 
@@ -41,6 +40,10 @@ one needs a human — so you can respond without leaving what you're doing.
   own config, so it auto-approves next time before the prompt ever fires.
 - **Settings** — launch at login, notification sounds, which display the notch
   lives on, and fully rebindable shortcuts.
+
+<div align="center">
+<img src="docs/sessions.png" width="720" alt="The notch panel listing several agents with status, branch, tokens, and cost">
+</div>
 
 ## Hot-keys
 
