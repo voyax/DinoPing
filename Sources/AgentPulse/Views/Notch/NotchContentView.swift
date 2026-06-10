@@ -110,22 +110,9 @@ struct NotchContentView: View {
         // NOTE: no `.onTapGesture` / `.onHover` — hover detection happens
         // at the NSEvent level in `NotchPanel`. See its comments for why.
         //
-        // Drop shadow — exactly per spec:
-        //   expanded: drop-shadow(0 24px 40px rgba(0,0,0,.55))
-        //           + drop-shadow(0 2px 6px rgba(0,0,0,.4))
-        //   compact:  no shadow (the pill sits flush against the menu bar)
-        .shadow(
-            color: isExpanded ? .black.opacity(0.55) : .clear,
-            radius: isExpanded ? 40 : 0,
-            x: 0,
-            y: isExpanded ? 24 : 0
-        )
-        .shadow(
-            color: isExpanded ? .black.opacity(0.40) : .clear,
-            radius: isExpanded ? 6 : 0,
-            x: 0,
-            y: isExpanded ? 2 : 0
-        )
+        // No drop shadow: on the transparent overlay window a large soft
+        // shadow pooled a visible dark halo around the silhouette on the
+        // desktop, so the panel sits flush instead.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(transitionAnimation, value: displayState)
         .animation(.smooth(duration: 0.28), value: agentManager.activeSessions.count)
